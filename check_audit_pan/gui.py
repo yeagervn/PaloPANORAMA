@@ -28,7 +28,8 @@ from .core import (
 )
 from .pan_api import (
     PanApiClient, get_devicegroup_list, parse_devicegroup_objects,
-    assemble_security_rules, delete_rule_candidate, fetch_rule_hit_count,
+    assemble_security_rules, delete_rule_candidate, disable_rule_candidate,
+    fetch_rule_hit_count,
 )
 from .resolver import GroupResolver, ServiceResolver
 from .detectors import (
@@ -147,7 +148,8 @@ class App(ttk.Frame):
         self.btn_open_output = ttk.Button(frm_actions, text="Mở thư mục Output",
                                           command=self._on_open_output)
         self.btn_open_output.pack(side="left", padx=6, pady=4)
-        ttk.Label(frm_actions, text="(Import chỉ áp dụng cho Shadow Rules và Disabled Rules - candidate config, không commit)",
+        ttk.Label(frm_actions,
+                  text="(Import: Shadow (hit=0) → Disable | Disabled → Delete | Overly chỉ Export)",
                   foreground="#888888").pack(side="left", padx=10)
 
         # Khung 4 - Bang ket qua
@@ -449,14 +451,20 @@ class App(ttk.Frame):
         self._update_button_states()
 
     # ---------------------------------------------------------------- import
+    # Quy tac moi (IV.4 cap nhat):
+    #   - Shadow Rules co hit_count == 0 (UNUSED, chua tung co hit hoac 0 hit trong 30 ngay)
+    #     -> khi Import CHI co option DISABLE (khong xoa thang) - an toan, cho phep rollback.
+    #   - Disabled Rules -> khi Import co option DELETE (xoa thang candidate).
+    #   - Overly Permissive Rules -> CHI EXPORT, khong cho Import thao tac gi (D5 moi).
     def _on_import(self):
         if not self._import_eligible:
             messagebox.showwarning("Import chưa sẵn sàng",
                                    "Import chỉ khả dụng sau khi Export thành công file có chứa "
-                                   "Shadow Rules hoặc Disabled Rules (D5).")
+                                   "Shadow Rules hoặc Disabled Rules (D5). "
+                                   "Overly Permissive chỉ Export, không Import.")
             return
         path = filedialog.askopenfilename(
-            title="Chọn file .xlsx đã export (để xoá rule trên Candidate Config)",
+            title="Chọn file .xlsx đã export (Shadow→Disable, Disabled→Delete)",
             filetypes=[("Excel files", "*.xlsx")],
         )
         if not path:
@@ -467,40 +475,93 @@ class App(ttk.Frame):
             messagebox.showerror("Lỗi đọc file Import", str(e))
             return
 
-        # Loc CHI giu Shadow Rules / Disabled Rules (D5) - Overly Permissive bo qua.
-        candidates = []      # (rule_name, loại, vi_tri, devicegroup, rulebase)
-        not_found = []       # (rule_name, loại)
-        duplicates = []      # (rule_name, loại, vi_tri)
-        for name, loai, vi_tri in rows:
+        # Phan loai theo quy tac moi:
+        #   Shadow (hit==0) -> disable ; Disabled -> delete ; Overly -> skip (export only)
+        candidates = []      # (rule_name, loai, vi_tri, devicegroup, rulebase, action)
+        not_found = []       # (rule_name, loai)
+        duplicates = []      # (rule_name, loai, vi_tri)
+        skipped_overly = 0
+        for row in rows:
+            # parse_import_file tra 4-tuple (name, loai, vi_tri, hit_raw) - giu tuong thich cu 3-tuple
+            if len(row) == 4:
+                name, loai, vi_tri, hit_raw = row
+            else:
+                name, loai, vi_tri = row[:3]
+                hit_raw = ""
+            # Overly Permissive chi Export - bo qua hoan toan khi Import
+            if loai == "Overly Permissive Rules":
+                skipped_overly += 1
+                self._log(f"CANH BAO: bỏ qua Overly Permissive '{name}' - loại này CHI EXPORT, không Import thao tác (quy tắc mới).")
+                continue
             if loai not in ("Shadow Rules", "Disabled Rules"):
                 self._log(f"CANH BAO: bỏ qua dòng 'not importable' Loại='{loai}' cho rule '{name}' (D5).")
                 continue
+
+            # Xac dinh action theo loai + hit_count
+            if loai == "Disabled Rules":
+                action = "delete"
+            else:  # Shadow Rules
+                # Shadow ->.disable . Neu hit_count !=0 van disable (an toan), nhung log nhan manh
+                # truong hop "hits count =0" la truong hop dien hinh duoc quy tac mo ta.
+                # Kiem tra ca Finding trong memory (chinh xac) va hit_raw tu file (fallback).
+                finding = next((f for f in self.findings if f.rule_name == name and f.vi_tri == vi_tri), None)
+                hit_is_zero = False
+                if finding is not None and finding.hit_count is not None:
+                    hit_is_zero = (finding.hit_count == 0)
+                elif hit_raw != "":
+                    try:
+                        hit_is_zero = (int(float(hit_raw)) == 0)
+                    except Exception:
+                        hit_is_zero = (hit_raw.strip() == "0")
+                else:
+                    # Khong co hit data -> coi nhu la 0-hit (UNREACHABLE) van cho disable
+                    hit_is_zero = True
+                action = "disable"
+                if not hit_is_zero:
+                    self._log(f"  Shadow '{name}' hit_count={hit_raw or (finding.hit_count if finding else 'N/A')} !=0 -> van cho phep Disable (khong Delete) theo quy tắc shadow->disable.")
+
             match = self.rule_by_key.get((name, vi_tri))
             if match is None:
                 not_found.append((name, loai))
             elif len([k for k in self.rule_by_key if k[0] == name]) > 1:
                 duplicates.append((name, loai, vi_tri))
-                self._log(f"CANH BAO: trùng tên rule '{name}' ({vi_tri}) trong config - KHÔNG xoá tự động (D9).")
+                self._log(f"CANH BAO: trùng tên rule '{name}' ({vi_tri}) trong config - KHÔNG thao tác tự động (D9).")
             else:
                 dg, rb = _vi_tri_to_xpath_params(vi_tri)
-                candidates.append((name, loai, vi_tri, dg, rb))
+                if not rb:
+                    self._log(f"CANH BAO: 'Vi tri Rule' không hợp lệ '{vi_tri}' cho rule '{name}' - bỏ qua.")
+                    continue
+                candidates.append((name, loai, vi_tri, dg, rb, action))
 
+        if skipped_overly:
+            self._log(f"Đã bỏ qua {skipped_overly} dòng Overly Permissive (chỉ Export).")
         if not candidates:
-            msg = "File import không có rule nào khớp chính xác với config hiện tại để xoá."
+            msg = "File import không có rule nào khớp chính xác với config hiện tại để thao tác."
             if not_found:
                 msg += "\n\nCác rule không còn tồn tại (hoặc đổi tên):\n- " + "\n- ".join(n for n, _ in not_found[:20])
             if duplicates:
                 msg += f"\n\n{len(duplicates)} rule trùng tên đã bỏ qua (theo D9 - an toàn)."
-            messagebox.showinfo("Không có rule để xoá", msg)
+            if skipped_overly:
+                msg += f"\n\n{skipped_overly} rule Overly Permissive đã bỏ qua (chỉ Export)."
+            messagebox.showinfo("Không có rule để thao tác", msg)
             return
 
         self._show_confirm_dialog(candidates, not_found)
 
     def _show_confirm_dialog(self, candidates, not_found):
+        # candidates: List[(name, loai, vi_tri, dg, rb, action)]
         dlg = tk.Toplevel(self.root)
-        dlg.title("Bạn muốn xoá:")
+        has_disable = any(c[5] == "disable" for c in candidates)
+        has_delete = any(c[5] == "delete" for c in candidates)
+        if has_disable and has_delete:
+            title = "Xác nhận Disable / Delete:"
+        elif has_disable:
+            title = "Xác nhận Disable (Shadow hit=0):"
+        else:
+            title = "Xác nhận Delete (Disabled):"
+        dlg.title(title)
         dlg.transient(self.root)
-        dlg.geometry("600x440")
+        dlg.geometry("720x480")
         try:
             dlg.grab_set()
         except Exception:
@@ -517,39 +578,50 @@ class App(ttk.Frame):
         canvas.pack(side="left", fill="both", expand=True)
         scroll.pack(side="right", fill="y")
 
-        ttk.Label(inner, text="Chọn Yes để xoá rule trên Candidate Config (mặc định No):",
-                  foreground="#333333").grid(row=0, column=0, columnspan=5, sticky="w", pady=(0, 6))
-        ttk.Label(inner, text="Rule / Vi tri", foreground="#666666").grid(row=0, column=2, columnspan=2,
-                                                                          sticky="w", padx=4)
+        hdr = "Chọn Yes để thực hiện trên Candidate Config (mặc định No):"
+        if has_disable and not has_delete:
+            hdr += "  [Shadow hit=0 → Disable]"
+        elif has_delete and not has_disable:
+            hdr += "  [Disabled → Delete]"
+        else:
+            hdr += "  [Shadow→Disable | Disabled→Delete]"
+        ttk.Label(inner, text=hdr,
+                  foreground="#333333").grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 6))
+        ttk.Label(inner, text="Rule", foreground="#666666").grid(row=1, column=0, sticky="w", padx=4)
+        ttk.Label(inner, text="Vi tri", foreground="#666666").grid(row=1, column=1, sticky="w", padx=4)
+        ttk.Label(inner, text="Hành động", foreground="#0066CC").grid(row=1, column=2, sticky="w", padx=4)
 
         # Radio mặc định MỖI dòng là No (an toàn - không tự tick Yes) - D5.
         vars_: List[tk.StringVar] = []
-        row_idx = 1
-        for idx, (name, _loai, vi_tri, _dg, _rb) in enumerate(candidates):
+        row_idx = 2
+        for idx, (name, _loai, vi_tri, _dg, _rb, action) in enumerate(candidates):
             var = tk.StringVar(value="No")
             vars_.append(var)
             ttk.Label(inner, text=name).grid(row=row_idx, column=0, sticky="w", padx=4, pady=2)
-            ttk.Radiobutton(inner, text="Yes", variable=var, value="Yes").grid(row=row_idx, column=1, padx=4)
-            ttk.Radiobutton(inner, text="No", variable=var, value="No").grid(row=row_idx, column=2, padx=4)
-            ttk.Label(inner, text=vi_tri, foreground="#444444").grid(row=row_idx, column=3, sticky="w", padx=4)
+            ttk.Label(inner, text=vi_tri, foreground="#444444").grid(row=row_idx, column=1, sticky="w", padx=4)
+            act_label = "Disable" if action == "disable" else "Delete"
+            act_color = "#CC6600" if action == "disable" else "#CC0000"
+            ttk.Label(inner, text=act_label, foreground=act_color, font=("TkDefaultFont", 9, "bold")).grid(row=row_idx, column=2, sticky="w", padx=4)
+            ttk.Radiobutton(inner, text="Yes", variable=var, value="Yes").grid(row=row_idx, column=3, padx=4)
+            ttk.Radiobutton(inner, text="No", variable=var, value="No").grid(row=row_idx, column=4, padx=4)
             row_idx += 1
 
         if not_found:
-            ttk.Separator(inner, orient="horizontal").grid(row=row_idx, column=0, columnspan=5,
+            ttk.Separator(inner, orient="horizontal").grid(row=row_idx, column=0, columnspan=6,
                                                            sticky="ew", pady=6)
             row_idx += 1
-            ttk.Label(inner, text="Các rule không thể xoá (không còn tồn tại trong config hiện tại):",
-                      foreground="#888888").grid(row=row_idx, column=0, columnspan=5, sticky="w")
+            ttk.Label(inner, text="Các rule không thể thao tác (không còn tồn tại trong config hiện tại):",
+                      foreground="#888888").grid(row=row_idx, column=0, columnspan=6, sticky="w")
             row_idx += 1
             for name, _loai in not_found:
                 var = tk.StringVar(value="No")
                 ttk.Label(inner, text=name, foreground="#AAAAAA").grid(row=row_idx, column=0,
                                                                        sticky="w", padx=4, pady=1)
                 ttk.Radiobutton(inner, text="Yes", variable=var, value="Yes",
-                                state="disabled").grid(row=row_idx, column=1, padx=4)
-                ttk.Radiobutton(inner, text="No", variable=var, value="No").grid(row=row_idx, column=2, padx=4)
+                                state="disabled").grid(row=row_idx, column=3, padx=4)
+                ttk.Radiobutton(inner, text="No", variable=var, value="No").grid(row=row_idx, column=4, padx=4)
                 ttk.Label(inner, text="Không còn tồn tại trong cấu hình hiện tại — có thể đã đổi tên/xoá từ trước",
-                          foreground="#AAAAAA").grid(row=row_idx, column=3, sticky="w")
+                          foreground="#AAAAAA").grid(row=row_idx, column=1, columnspan=2, sticky="w")
                 vars_.append(var)
                 row_idx += 1
 
@@ -560,10 +632,10 @@ class App(ttk.Frame):
             yes = [c for c, _v in zip(candidates, vars_[:len(candidates)]) if _v.get() == "Yes"]
             dlg.destroy()
             if not yes:
-                self._log("Bạn đã chọn No cho tất cả → không xoá rule nào.")
+                self._log("Bạn đã chọn No cho tất cả → không thao tác rule nào.")
                 return
-            names = [c[0] for c in yes]
-            self._log(f"Xác nhận xoá {len(names)} rule trên Candidate Config: {', '.join(names)}")
+            names = [f"{c[0]}({c[5]})" for c in yes]
+            self._log(f"Xác nhận thao tác {len(names)} rule trên Candidate Config: {', '.join(names)}")
             self._set_busy(True)
             threading.Thread(target=self._delete_worker,
                              args=(yes, self._mgmt_ip, self._api_key, self._verify_ssl),
@@ -577,28 +649,35 @@ class App(ttk.Frame):
         dlg.bind("<Escape>", lambda e: dlg.destroy())
 
     def _delete_worker(self, candidates, mgmt_ip, api_key, verify_ssl):
-        """candidates: List[(name, loai, vi_tri, devicegroup, rulebase)]"""
-        ok, fail = 0, []
-        for name, _loai, _vi, dg, rb in candidates:
+        """candidates: List[(name, loai, vi_tri, devicegroup, rulebase, action)] action=disable|delete"""
+        ok_disable, ok_delete, fail = 0, 0, []
+        for name, _loai, _vi, dg, rb, action in candidates:
             if self.cancel_event.is_set():
                 self._log("Đã huỷ theo yêu cầu (shutdown).")
                 break
             try:
-                delete_rule_candidate(mgmt_ip, api_key, dg, rb, name, verify_ssl=verify_ssl)
-                ok += 1
-                self._log(f"  -> Xoá candidate OK: '{name}' ({rb}/{dg})")
+                if action == "disable":
+                    disable_rule_candidate(mgmt_ip, api_key, dg, rb, name, verify_ssl=verify_ssl)
+                    ok_disable += 1
+                    self._log(f"  -> Disable candidate OK: '{name}' ({rb}/{dg})")
+                else:
+                    delete_rule_candidate(mgmt_ip, api_key, dg, rb, name, verify_ssl=verify_ssl)
+                    ok_delete += 1
+                    self._log(f"  -> Xoá candidate OK: '{name}' ({rb}/{dg})")
             except PanApiError as e:
-                fail.append((name, f"{rb}/{dg}: {e.user_message}"))
-                self._log(f"  -> Xoá candidate LỖI '{name}' ({rb}/{dg}): {e.user_message} (tiếp tục rule khác - Continue)")
+                fail.append((name, f"{action} {rb}/{dg}: {e.user_message}"))
+                self._log(f"  -> {action.upper()} candidate LỖI '{name}' ({rb}/{dg}): {e.user_message} (tiếp tục rule khác - Continue)")
             except Exception as e:
-                fail.append((name, f"{rb}/{dg}: {e}"))
-                self._log(f"  -> Xoá candidate LỖI KHÔNG XÁC ĐỊNH '{name}' ({rb}/{dg}): {e}")
-        self.msg_queue.put(("done_delete", (ok, fail)))
+                fail.append((name, f"{action} {rb}/{dg}: {e}"))
+                self._log(f"  -> {action.upper()} candidate LỖI KHÔNG XÁC ĐỊNH '{name}' ({rb}/{dg}): {e}")
+        self.msg_queue.put(("done_delete", (ok_disable, ok_delete, fail)))
 
     def _finish_delete(self, payload):
-        ok, fail = payload
-        msg = (f"Xoá thành công (Candidate Config): {ok} rule.\n"
-               f"Lỗi: {len(fail)} rule.")
+        ok_disable, ok_delete, fail = payload
+        total_ok = ok_disable + ok_delete
+        msg = (f"Disable thành công (Candidate Config): {ok_disable} rule.\n"
+               f"Xoá thành công (Candidate Config): {ok_delete} rule.\n"
+               f"Tổng thành công: {total_ok} rule. Lỗi: {len(fail)} rule.")
         for name, err in fail[:10]:
             msg += f"\n  - {name}: {err}"
         if len(fail) > 10:
@@ -606,7 +685,7 @@ class App(ttk.Frame):
         msg += ("\n\nCác thay đổi trên CHỈ nằm ở Candidate Config của Panorama (chưa commit). "
                 "Vui lòng vào Panorama review rồi Commit theo 2 tầng: "
                 "Commit to Panorama → Commit and Push, để áp dụng xuống Firewall (0.4).")
-        messagebox.showinfo("Kết quả xoá", msg)
+        messagebox.showinfo("Kết quả thao tác", msg)
         self._set_busy(False)
 
     # -------------------------------------------------------------- misc

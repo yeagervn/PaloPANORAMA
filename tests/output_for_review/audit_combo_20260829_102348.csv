@@ -1,0 +1,7 @@
+﻿Loại (Finding Type),Name Rule,Vi tri Rule,Source IP,Dest IP,Port,Action,Disabled,Detail,Rule UUID,Shadow Reason,Hit Count,Last Hit Date,Rule Creation Date,No Hits Duration
+Shadow Rules,R2-SHADOW-HIT0,DG1-PRE,10.0.0.5,10.0.0.6,1521,allow,No,"Bị che bởi rule 'R1-BROAD-ALLOW' (index 0, action=allow) | Chưa từng có hit nào kể từ khi tạo rule (45 ngày, tạo lúc: 2026-07-15)",u2,"UNREACHABLE, UNUSED",0,,2026-07-15,"Chưa từng có hit nào kể từ khi tạo rule (45 ngày, tạo lúc: 2026-07-15)"
+Shadow Rules,R3-DISABLED,DG1-PRE,10.1.0.1,10.1.0.2,80,deny,Yes,"⚠ KHÁC ACTION - Bị che bởi rule 'R1-BROAD-ALLOW' (index 0, action=allow) (R2 đang Disabled)",u3,UNREACHABLE,,,,
+Shadow Rules,R4-OVERLY-ANY,DG1-PRE,any,any,any,allow,No,"Bị che bởi rule 'R1-BROAD-ALLOW' (index 0, action=allow)",u4,UNREACHABLE,,,,
+Disabled Rules,R3-DISABLED,DG1-PRE,10.1.0.1,10.1.0.2,80,deny,Yes,Rule đang ở trạng thái Disabled,u3,,,,,
+Overly Permissive Rules,R1-BROAD-ALLOW,Shared-PRE,any,any,any,allow,No,"Source=any, Dest=any, Dest Port=any, Source+Dest=any, Source+Dest Port=any, Dest+Dest Port=any",u1,,,,,
+Overly Permissive Rules,R4-OVERLY-ANY,DG1-PRE,any,any,any,allow,No,"Source=any, Dest=any, Dest Port=any, Source+Dest=any, Source+Dest Port=any, Dest+Dest Port=any",u4,,,,,

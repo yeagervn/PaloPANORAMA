@@ -133,6 +133,41 @@ class PanApiClient:
             )
         return True
 
+    def disable_rule_candidate(self, devicegroup: str, rulebase: str, rule_name: str) -> bool:
+        """
+        DISABLE 1 Security Rule tren CANDIDATE CONFIG (thay vi xoa) - danh cho
+        Shadow Rules co hit_count==0 (IV.4 phan biet: shadow-0-hit -> disable,
+        disabled -> delete, overly -> export only).
+
+        Thuc hien bang `type=config&action=set&xpath=.../disabled&element=<disabled>yes</disabled>`.
+        KHONG commit, KHONG push - giong delete_rule_candidate (D6/0.4).
+        """
+        if rulebase in ("pre", "post"):
+            xpath = (
+                f"/config/devices/entry[@name='localhost.localdomain']"
+                f"/device-group/entry[@name='{devicegroup}']"
+                f"/{rulebase}-rulebase/security/rules/entry[@name='{rule_name}']/disabled"
+            )
+        elif rulebase in ("shared-pre", "shared-post"):
+            tag = "pre-rulebase" if rulebase == "shared-pre" else "post-rulebase"
+            xpath = (
+                f"/config/shared/{tag}/security/rules/entry[@name='{rule_name}']/disabled"
+            )
+        else:
+            raise PanApiError(
+                f"Unknown rulebase '{rulebase}'",
+                f"rulebase khong hop le: '{rulebase}' (can la pre/post/shared-pre/shared-post).",
+            )
+        params = {"type": "config", "action": "set", "xpath": xpath, "element": "<disabled>yes</disabled>"}
+        try:
+            self._request(params)
+        except PanApiError as e:
+            raise PanApiError(
+                str(e),
+                f"Disable rule '{rule_name}' ({rulebase}/{devicegroup}) tren Candidate Config that bai: {e.user_message}",
+            )
+        return True
+
     def fetch_rule_hit_count(self, target_serial: str, log_func=None) -> Dict[str, RuleHitStat]:
         """
         Best-effort (0.7/D10): doc thong ke hit-count cua TOAN BO Security Rule tren
@@ -582,6 +617,13 @@ def delete_rule_candidate(panorama_ip: str, api_key: str, devicegroup: str, rule
     """Xoa 1 rule tren Candidate Config cua Panorama. KHONG commit, KHONG push (D6/0.4)."""
     client = PanApiClient(panorama_ip, api_key, verify_ssl=verify_ssl)
     return client.delete_rule_candidate(devicegroup, rulebase, rule_name)
+
+
+def disable_rule_candidate(panorama_ip: str, api_key: str, devicegroup: str, rulebase: str,
+                           rule_name: str, verify_ssl: bool = False) -> bool:
+    """Disable 1 rule tren Candidate Config (shadow hit_count==0 -> disable thay vi delete). KHONG commit, KHONG push."""
+    client = PanApiClient(panorama_ip, api_key, verify_ssl=verify_ssl)
+    return client.disable_rule_candidate(devicegroup, rulebase, rule_name)
 
 
 def fetch_rule_hit_count(panorama_ip: str, api_key: str, target_serial: str,

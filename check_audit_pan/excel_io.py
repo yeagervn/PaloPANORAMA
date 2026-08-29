@@ -218,14 +218,17 @@ def _export_csv(findings, out_path, service_info):
 # ============================================================================
 # DOC LAI FILE DE IMPORT (Mục 5/Mục 6)
 # ============================================================================
-def parse_import_file(path: str, log_func=None) -> List[Tuple[str, str, str]]:
+def parse_import_file(path: str, log_func=None) -> List[Tuple[str, str, str, str]]:
     """
     Doc file .xlsx da export (hoac ban admin da sua), validate:
       - Phai co header dung ten cot (khong phan biet hoa/thuong, tu trim).
         Thieu cot 'Name Rule' / 'Loại' / 'Vi tri Rule' -> raise loi ro rang, khong doan.
       - Dong thieu Name Rule (rong) -> bo qua + log canh bao, khong loi toan file.
-    Tra ve List[(rule_name, finding_type, vi_tri)] cho GUI xu ly tiep (loc loai co
-    Import + popup xac nhan xoa + delete candidate) - `vi_tri` dung de dựng xpath (0.8).
+    Tra ve List[(rule_name, finding_type, vi_tri, hit_count_raw)] cho GUI xu ly tiep:
+      - `vi_tri` dung de dựng xpath (0.8).
+      - `hit_count_raw` (cot 'Hit Count') dung de phan biet Shadow hit_count==0 -> disable
+        thay vi delete (IV.4 moi: shadow-0-hit disable, disabled delete, overly export only).
+        File cu khong co cot Hit Count -> tra "" (giu tuong thich nguoc).
     """
     log = log_func or (lambda msg: None)
 
@@ -263,6 +266,11 @@ def parse_import_file(path: str, log_func=None) -> List[Tuple[str, str, str]]:
         if key == "vi tri rule":
             vi_tri_col = idx
             break
+    hit_count_col = None
+    for key, idx in norm.items():
+        if key == "hit count":
+            hit_count_col = idx
+            break
     if name_col is None:
         raise ValueError("File import thieu cot bat buoc 'Name Rule' - khong the doc.")
     if loai_col is None:
@@ -270,7 +278,7 @@ def parse_import_file(path: str, log_func=None) -> List[Tuple[str, str, str]]:
     if vi_tri_col is None:
         raise ValueError("File import thieu cot bat buoc 'Vi tri Rule' - khong the doc.")
 
-    result: List[Tuple[str, str, str]] = []
+    result: List[Tuple[str, str, str, str]] = []
     for row in ws.iter_rows(min_row=2, values_only=True):
         name = ""
         if name_col < len(row) and row[name_col] is not None:
@@ -281,10 +289,13 @@ def parse_import_file(path: str, log_func=None) -> List[Tuple[str, str, str]]:
         vi_tri = ""
         if vi_tri_col < len(row) and row[vi_tri_col] is not None:
             vi_tri = str(row[vi_tri_col]).strip()
+        hit_raw = ""
+        if hit_count_col is not None and hit_count_col < len(row) and row[hit_count_col] is not None:
+            hit_raw = str(row[hit_count_col]).strip()
         if not name:
             log("CANH BAO: bo qua dong khong co Name Rule khi Import.")
             continue
-        result.append((name, loai, vi_tri))
+        result.append((name, loai, vi_tri, hit_raw))
 
     if not result:
         log("CANH BAO: file import khong co dong du lieu hop le nao (chi header).")

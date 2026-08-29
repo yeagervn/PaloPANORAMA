@@ -461,12 +461,15 @@ cho việc audit ngầm định "vsys hiện tại"); thêm ô **Target Firewall
 (ảnh hưởng Rule Hit Count + độ chính xác so Zone ở shadow-check, 0.7/IV.2.3). Khung 2/3/4/5 —
 **không đổi**, chỉ Khung 4 (bảng kết quả) thêm 1 cột **"Vi tri Rule"** như IV.1.
 
-## IV.4. Luồng Import → popup xác nhận xoá — không đổi trình tự D5/D6/D9, chỉ đổi bước dựng xpath
+## IV.4. Luồng Import → popup xác nhận (đã phân biệt hành động từ 2026-08-29)
 
-Bước 4 (`delete_rule_candidate()`): xpath nay dựng theo cột **"Vi tri Rule"** đọc được từ file
-Import (0.8) — trỏ đúng `pre-rulebase` hoặc `post-rulebase` của đúng Device Group, hoặc Shared
-tương ứng. Bước 5 (cảnh báo cuối) **đổi nội dung theo 0.4**: nhấn mạnh 2 tầng commit (Panorama →
-Push), không chỉ 1 tầng như bản Firewall gốc.
+**Quy tắc mới (IV.4 cập nhật):**
+- **Shadow Rules có `hit_count==0` (UNUSED, 0 hits)** → khi Import **chỉ cho phép Disable** (không xóa thẳng).
+  Gọi `disable_rule_candidate()` → `action=set` xpath `.../disabled` với `<disabled>yes</disabled>`, CANDIDATE only, không commit/push. Popup hiển thị **"Disable" (màu cam)**.
+- **Disabled Rules** → khi Import **cho phép Delete** (xóa thẳng candidate). Gọi `delete_rule_candidate()` → `action=delete` xpath entry. Popup hiển thị **"Delete" (màu đỏ)**.
+- **Overly Permissive Rules** → **chỉ Export**, Import bỏ qua hoàn toàn (log cảnh báo, không hiện trong popup) — D5 mới.
+
+Trình tự D5/D6/D9 giữ nguyên, chỉ bước 4 tách nhánh: `disable_rule_candidate()` vs `delete_rule_candidate()` dựng xpath theo cột **"Vi tri Rule"** (0.8) — trỏ đúng `pre-rulebase`/`post-rulebase` của đúng Device Group hoặc Shared. `parse_import_file()` nay đọc thêm cột `Hit Count` (4-tuple) để xác định hit==0 chính xác, giữ tương thích file cũ không có cột (coi như 0). Bước 5 (cảnh báo cuối) **đổi nội dung theo 0.4 + báo cáo riêng**: `Disable OK: X / Delete OK: Y / Lỗi: Z`, nhấn mạnh 2 tầng commit (Panorama → Push), không chỉ 1 tầng như bản Firewall gốc.
 
 ## IV.5. Định dạng Export/Import — 15 cột (thêm 1 so với bản gốc)
 
@@ -480,11 +483,12 @@ ràng, giữ nguyên nguyên tắc validate nghiêm ngặt của bản gốc ch�
 ## IV.6. `pan_api.py` — API rules bắt buộc (bản Panorama)
 
 1. `delete_rule_candidate(panorama_ip, api_key, devicegroup, rulebase, rule_name, verify_ssl)` —
-   KHÔNG request nào chứa `type=commit` — giữ nguyên.
-2. `fetch_rule_hit_count(panorama_ip, api_key, target_serial, verify_ssl, log_func)` — bắt buộc
+   KHÔNG request nào chứa `type=commit` — giữ nguyên. Dùng cho **Disabled Rules → Delete**.
+2. `disable_rule_candidate(panorama_ip, api_key, devicegroup, rulebase, rule_name, verify_ssl)` — **mới từ 2026-08-29** cho **Shadow hit==0 → Disable**: `type=config&action=set&xpath=.../disabled&element=<disabled>yes</disabled>`, KHÔNG commit/push.
+3. `fetch_rule_hit_count(panorama_ip, api_key, target_serial, verify_ssl, log_func)` — bắt buộc
    `target_serial`; thiếu → trả `{}` ngay không gọi API (0.7); lỗi/không hỗ trợ → log cảnh báo +
    `{}` — giữ nguyên D10.
-3. `get_devicegroup_list()` / `resolve_devicegroup_chain(dg_name)` (thay `get_vsys_list()`) /
+4. `get_devicegroup_list()` / `resolve_devicegroup_chain(dg_name)` (thay `get_vsys_list()`) /
    `parse_security_rules()` gọi cho từng phần tử trong chuỗi + Shared, cả pre lẫn post, rồi lắp
    ráp theo 0.3 (thay `get_vsys_element()`/1-lần-parse cũ) / `parse_devicegroup_objects()` (thay
    `parse_vsys_objects()`, đọc theo chuỗi thừa kế 0.2).
@@ -516,11 +520,30 @@ chỉ thêm 1 dòng vào checklist V.3: **"Sửa gì liên quan tới nguồn d�
 Device Group, target)? → đọc lại PHẦN 0 trước khi sửa, đảm bảo không phá vỡ nguyên tắc lắp ráp
 0.3 hoặc thừa kế object 0.2."**
 
+## V.4 — Quy tắc đồng bộ tài liệu (BẮT BUỘC - hiệu lực từ 2026-08-29)
+
+> **Mỗi lần chỉnh sửa code (bất kỳ file nào trong `check_rule_pan/`, `check_ip_pan/`, `check_audit_pan/`
+> hoặc `tools/`), bắt buộc phải đồng thời cập nhật `PaloPANORAMA_single.md` trong cùng commit:**
+
+1. **Cập nhật PHẦN XIV** — thêm 1 dòng changelog mới ở đầu danh sách (giữ nguyên các dòng cũ), ghi rõ:
+   ` [YYYY-MM-DD] Tên thay đổi — file đã sửa — lý do/nghiệp vụ — người thực hiện (nếu có)`.
+2. **Cập nhật đúng Phần nghiệp vụ tương ứng** (0 / II / III / IV) nếu luật/thứ tự/API thay đổi — không chỉ ghi ở XIV.
+3. **Rebuild file single** — chạy `python tools/build_panorama_single.py` và `python -m py_compile PaloPANORAMA_single.py` để đảm bảo single-file đồng bộ với source rời.
+4. **Không tách commit** "code riêng, doc riêng" — 1 thay đổi = 1 commit chứa cả code + md + single (nếu có). Reviewer từ chối PR nếu thiếu bước 1-3.
+5. **Automation gợi ý**: pre-commit hook `tools/check_md_sync.py` (nếu có) sẽ so sánh `git diff --name-only` có chứa `*.py` nhưng không chứa `PaloPANORAMA_single.md` → cảnh báo fail; chạy `python tools/build_panorama_single.py --check-md` để verify.
+
+*Vi phạm quy tắc này được coi là thiếu bàn giao — phải bổ sung ngay trước khi merge/release.*
+
 ---
 
 # PHẦN XIV — NHẬT KÝ THAY ĐỔI GẦN NHẤT
 
 > Chỉ liệt kê ngắn gọn. Chi tiết luật nghiệp vụ đã có sẵn ở Phần 0/II/III/IV — không lặp lại.
+> **Quy tắc V.4**: mỗi dòng dưới đây tương ứng 1 commit đồng bộ code + md + single.
+
+- **[2026-08-29] CHECK AUDIT — Phân biệt Import theo loại + Quy tắc đồng bộ .md (V.4).**
+  (1) `check_audit_pan`: Shadow Rules có `hit_count==0` (UNUSED 0 hits) khi Import **chỉ cho phép Disable**
+  (gọi `disable_rule_candidate` → `action=set` `<disabled>yes</disabled>`, không xóa), **Disabled Rules khi Import cho phép Delete** (`delete_rule_candidate`), **Overly Permissive chỉ Export** (Import bỏ qua hoàn toàn, log cảnh báo). Popup xác nhận hiển thị cột "Hành động" (Disable màu cam / Delete màu đỏ), worker tách nhánh `disable` vs `delete`, kết quả báo cáo riêng `Disable OK / Delete OK`. `excel_io.parse_import_file` mở rộng đọc cột `Hit Count` (trả 4-tuple) để xác định hit==0 chính xác, giữ tương thích file cũ không có cột. (2) `pan_api`: thêm `PanApiClient.disable_rule_candidate()` + wrapper `disable_rule_candidate()`. (3) Tài liệu: thêm **V.4 Quy tắc đồng bộ tài liệu** — mọi chỉnh sửa code bắt buộc cập nhật đồng thời XIV + rebuild single trong cùng commit, kèm checklist và automation gợi ý. File đã sửa: `check_audit_pan/pan_api.py`, `check_audit_pan/excel_io.py`, `check_audit_pan/gui.py`, `PaloPANORAMA_single.md`; rebuild `PaloPANORAMA_single.py`.
 
 - **[2026-08] Chuyển đổi toàn bộ Suite từ Firewall standalone sang Panorama.** Giữ nguyên 100%
   luật nghiệp vụ của cả 3 tool (thứ tự tier, điều kiện exact-scope, 3 quy tắc loại rule quá rộng,

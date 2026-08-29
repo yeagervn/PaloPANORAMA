@@ -1,0 +1,30 @@
+=== FULL AUDIT FLOW TEST ===
+HEADERS=['Loại (Finding Type)', 'Name Rule', 'Vi tri Rule', 'Source IP', 'Dest IP', 'Port', 'Action', 'Disabled', 'Detail', 'Rule UUID', 'Shadow Reason', 'Hit Count', 'Last Hit Date', 'Rule Creation Date', 'No Hits Duration'] len=15
+Shadow findings: 3 ['R2-SHADOW-HIT0', 'R3-DISABLED', 'R4-OVERLY-ANY']
+Disabled findings: 1 ['R3-DISABLED']
+Overly findings: 2 ['R1-BROAD-ALLOW', 'R4-OVERLY-ANY']
+Total findings: 6
+Exported: C:\Users\tuann\OneDrive\tool\palo_panorama\PaloPANORAMA\tests\output_for_review\audit_combo_20260829_102348.xlsx
+Exported CSV: C:\Users\tuann\OneDrive\tool\palo_panorama\PaloPANORAMA\tests\output_for_review\audit_combo_20260829_102348.csv
+Parse rows count: 6
+  row: ('R2-SHADOW-HIT0', 'Shadow Rules', 'DG1-PRE', '0')
+  row: ('R3-DISABLED', 'Shadow Rules', 'DG1-PRE', '')
+  row: ('R4-OVERLY-ANY', 'Shadow Rules', 'DG1-PRE', '')
+  row: ('R3-DISABLED', 'Disabled Rules', 'DG1-PRE', '')
+  row: ('R1-BROAD-ALLOW', 'Overly Permissive Rules', 'Shared-PRE', '')
+  row: ('R4-OVERLY-ANY', 'Overly Permissive Rules', 'DG1-PRE', '')
+  -> Candidate R2-SHADOW-HIT0 [Shadow Rules] hit=0 => disable
+  -> Candidate R3-DISABLED [Shadow Rules] hit= => disable
+  -> Candidate R4-OVERLY-ANY [Shadow Rules] hit= => disable
+  -> Candidate R3-DISABLED [Disabled Rules] hit= => delete
+  -> Skip Overly R1-BROAD-ALLOW
+  -> Skip Overly R4-OVERLY-ANY
+Candidates: 4 skipped overly=2
+GUI logic OK: shadow->disable, disabled->delete, overly skipped
+  FAKE disable R2-SHADOW-HIT0 -> /config/devices/entry[@name='localhost.localdomain']/device-group/entry[@name='DG1']/pre-rulebase/security/rules/entry[@name='R2-SHADOW-HIT0']/disabled
+  FAKE disable R3-DISABLED -> /config/devices/entry[@name='localhost.localdomain']/device-group/entry[@name='DG1']/pre-rulebase/security/rules/entry[@name='R3-DISABLED']/disabled
+  FAKE disable R4-OVERLY-ANY -> /config/devices/entry[@name='localhost.localdomain']/device-group/entry[@name='DG1']/pre-rulebase/security/rules/entry[@name='R4-OVERLY-ANY']/disabled
+  FAKE delete R3-DISABLED -> /config/devices/entry[@name='localhost.localdomain']/device-group/entry[@name='DG1']/pre-rulebase/security/rules/entry[@name='R3-DISABLED']
+API calls: 4 actions: ['set', 'set', 'set', 'delete']
+API disable/delete OK
+No commit verified
