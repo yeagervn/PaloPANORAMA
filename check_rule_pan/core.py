@@ -367,7 +367,11 @@ def resolve_devicegroup_chain(root, dg_name) -> Tuple[List[str], List]:
     parents = _dg_parents_from_config(root)
     chain_names: List[str] = []
     cur = dg_name
+    visited = set()
     while cur:
+        if cur in visited:
+            break
+        visited.add(cur)
         chain_names.append(cur)
         parent = parents.get(cur)
         if not parent or parent == cur:

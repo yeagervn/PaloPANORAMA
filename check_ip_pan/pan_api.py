@@ -193,7 +193,11 @@ def resolve_devicegroup_chain(config_root: ET.Element, dg_name: str
     parents = _dg_parents_from_config(config_root)
     chain_names: List[str] = []
     cur = dg_name
+    visited = set()
     while cur:
+        if cur in visited:
+            break
+        visited.add(cur)
         chain_names.append(cur)
         parent = parents.get(cur)
         if not parent or parent == cur:

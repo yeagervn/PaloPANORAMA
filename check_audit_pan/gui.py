@@ -29,7 +29,7 @@ from .core import (
 from .pan_api import (
     PanApiClient, get_devicegroup_list, parse_devicegroup_objects,
     assemble_security_rules, delete_rule_candidate, disable_rule_candidate,
-    fetch_rule_hit_count,
+    fetch_rule_hit_count, fetch_current_rule_states,
 )
 from .resolver import GroupResolver, ServiceResolver
 from .detectors import (
@@ -523,10 +523,14 @@ class App(ttk.Frame):
             match = self.rule_by_key.get((name, vi_tri))
             if match is None:
                 not_found.append((name, loai))
-            elif len([k for k in self.rule_by_key if k[0] == name]) > 1:
-                duplicates.append((name, loai, vi_tri))
-                self._log(f"CANH BAO: trùng tên rule '{name}' ({vi_tri}) trong config - KHÔNG thao tác tự động (D9).")
             else:
+                # SỬA 2026-09-02 audit: trước đây chặn mọi trùng tên (kiểm tra len([k for k in rule_by_key if k[0]==name])>1)
+                # dù đã có vi_tri để phân biệt — quá tay, dù an toàn nhưng làm giảm tự động hoá.
+                # Nay đã có vi_tri chính xác nên không cần chặn theo tên thuần nữa; chỉ cần match chính xác (name, vi_tri) là đủ.
+                # Giữ lại log cảnh báo nếu trùng tên ở DG khác để audit, nhưng không chặn.
+                dup_count = len([k for k in self.rule_by_key if k[0] == name])
+                if dup_count > 1:
+                    self._log(f"Lưu ý: rule '{name}' trùng tên ở {dup_count} vị trí khác nhau, nhưng candidate có vi_tri='{vi_tri}' nên vẫn xử lý chính xác theo vi_tri (D9 đã sửa).")
                 dg, rb = _vi_tri_to_xpath_params(vi_tri)
                 if not rb:
                     self._log(f"CANH BAO: 'Vi tri Rule' không hợp lệ '{vi_tri}' cho rule '{name}' - bỏ qua.")
@@ -638,7 +642,7 @@ class App(ttk.Frame):
             self._log(f"Xác nhận thao tác {len(names)} rule trên Candidate Config: {', '.join(names)}")
             self._set_busy(True)
             threading.Thread(target=self._delete_worker,
-                             args=(yes, self._mgmt_ip, self._api_key, self._verify_ssl),
+                             args=(yes, self._mgmt_ip, self._api_key, self._verify_ssl, self._target_serial),
                              daemon=True).start()
 
         ttk.Button(btn_row, text="Xác nhận", command=on_confirm).pack(side="left", padx=8)
@@ -648,13 +652,91 @@ class App(ttk.Frame):
         dlg.bind("<Return>", lambda e: on_confirm())
         dlg.bind("<Escape>", lambda e: dlg.destroy())
 
-    def _delete_worker(self, candidates, mgmt_ip, api_key, verify_ssl):
-        """candidates: List[(name, loai, vi_tri, devicegroup, rulebase, action)] action=disable|delete"""
-        ok_disable, ok_delete, fail = 0, 0, []
-        for name, _loai, _vi, dg, rb, action in candidates:
+    def _delete_worker(self, candidates, mgmt_ip, api_key, verify_ssl, target_serial=""):
+        """
+        R1-R4: Xác minh batch trước khi Disable/Delete - chi phí cố định 4-5 API call/batch.
+        candidates: List[(name, loai, vi_tri, devicegroup, rulebase, action)] action=disable|delete
+        target_serial: str từ ô Target Firewall (Serial), có thể rỗng (degrade im lặng 0.7)
+        """
+        # R2: Batch xác minh (chỉ 1 lần cho cả batch)
+        fresh_hit_stats = {}
+        fresh_states = None
+        # R2.a: fresh hit stats nếu có target
+        if target_serial:
+            try:
+                self._log(f"Xác minh batch: đọc lại hit-count cho Target={target_serial}...")
+                fresh_hit_stats = fetch_rule_hit_count(mgmt_ip, api_key, target_serial, verify_ssl=verify_ssl, log_func=self._log)
+                self._log(f"  -> fresh_hit_stats: {len(fresh_hit_stats)} entry (khoá (name,vi_tri))")
+            except Exception as e:
+                self._log(f"CANH BAO: fetch_rule_hit_count lỗi best-effort: {e} -> bỏ xác minh hit-count")
+                fresh_hit_stats = {}
+        else:
+            self._log("Xác minh batch: không có Target Serial -> bỏ qua kiểm tra hit-count (degrade im lặng 0.7)")
+            fresh_hit_stats = {}
+        # R2.b: fresh rule states 4 lệnh wildcard
+        try:
+            self._log("Xác minh batch: đọc lại Candidate Config 4 wildcard (Shared-PRE/POST + DG PRE/POST)...")
+            fresh_states = fetch_current_rule_states(mgmt_ip, api_key, verify_ssl=verify_ssl, log_func=self._log)
+            if fresh_states is None:
+                self._log("  -> fresh_states: None (lỗi 1 trong 4 lệnh) -> bỏ xác minh, dùng dữ liệu Check cũ")
+            else:
+                self._log(f"  -> fresh_states: {len(fresh_states)} rule (khoá (name,vi_tri))")
+        except Exception as e:
+            self._log(f"CANH BAO: fetch_current_rule_states lỗi best-effort: {e} -> bỏ xác minh")
+            fresh_states = None
+
+        ok_disable, ok_delete = 0, 0
+        filtered_verify = 0  # Z: bị loại khi xác minh lại
+        skipped_already = 0  # W: đã ở trạng thái mong muốn sẵn
+        fail = []  # V: lỗi API thật
+
+        for name, _loai, vi_tri, dg, rb, action in candidates:
             if self.cancel_event.is_set():
                 self._log("Đã huỷ theo yêu cầu (shutdown).")
                 break
+
+            # R3: Tra cứu tại chỗ bằng (name, vi_tri), không gọi API trong loop
+            state = None
+            if fresh_states is not None:
+                state = fresh_states.get((name, vi_tri))
+                if state is None:
+                    self._log(f"  -> Bỏ qua '{name}' ({vi_tri}): Rule không còn tồn tại đúng vị trí tại thời điểm thực thi")
+                    filtered_verify += 1
+                    continue
+
+            # Lấy orig data để so sánh S/D/S (từ rule_by_key lúc Check)
+            orig = self.rule_by_key.get((name, vi_tri)) if hasattr(self, 'rule_by_key') else None
+
+            # 2) Disabled->delete nhưng đã enable lại
+            if action == "delete" and state is not None and state.get("disabled") is False:
+                self._log(f"  -> Bỏ qua '{name}' ({vi_tri}): Rule đã được enable lại, không còn là Disabled Rule")
+                filtered_verify += 1
+                continue
+
+            # 3) Shadow->disable nhưng đã disabled sẵn -> bỏ qua an toàn, không fail, không gọi lại API
+            if action == "disable" and state is not None and state.get("disabled") is True:
+                self._log(f"  -> Bỏ qua '{name}' ({vi_tri}): đã disabled sẵn, bỏ qua gọi API thừa")
+                skipped_already += 1
+                continue
+
+            # 4) Shadow->disable nhưng S/D/S đã bị sửa (SỬA 2026-09-02 audit: so sánh set thay vì list để tránh sai do thứ tự <member> khác)
+            if action == "disable" and state is not None and orig is not None:
+                if (set(state.get("source") or []) != set(orig.source) or
+                    set(state.get("destination") or []) != set(orig.destination) or
+                    set(state.get("service") or []) != set(orig.service)):
+                    self._log(f"  -> Bỏ qua '{name}' ({vi_tri}): Rule đã bị chỉnh sửa Source/Destination/Service từ lúc Check - cần Check lại")
+                    filtered_verify += 1
+                    continue
+
+            # 5) Shadow->disable + có target + có fresh_hit_stats + hit_count is not None (0-hit luôn None theo D10)
+            if action == "disable" and target_serial and fresh_hit_stats:
+                stat = fresh_hit_stats.get((name, vi_tri))
+                if stat is not None and stat.hit_count is not None:
+                    self._log(f"  -> Bỏ qua '{name}' ({vi_tri}): Hit Count đã thay đổi kể từ lúc Check (hit={stat.hit_count}) - bỏ qua để an toàn")
+                    filtered_verify += 1
+                    continue
+
+            # Ngược lại -> tiếp tục gọi API như cũ
             try:
                 if action == "disable":
                     disable_rule_candidate(mgmt_ip, api_key, dg, rb, name, verify_ssl=verify_ssl)
@@ -670,14 +752,17 @@ class App(ttk.Frame):
             except Exception as e:
                 fail.append((name, f"{action} {rb}/{dg}: {e}"))
                 self._log(f"  -> {action.upper()} candidate LỖI KHÔNG XÁC ĐỊNH '{name}' ({rb}/{dg}): {e}")
-        self.msg_queue.put(("done_delete", (ok_disable, ok_delete, fail)))
+
+        self.msg_queue.put(("done_delete", (ok_disable, ok_delete, filtered_verify, skipped_already, fail)))
 
     def _finish_delete(self, payload):
-        ok_disable, ok_delete, fail = payload
+        ok_disable, ok_delete, filtered_verify, skipped_already, fail = payload
         total_ok = ok_disable + ok_delete
         msg = (f"Disable thành công (Candidate Config): {ok_disable} rule.\n"
                f"Xoá thành công (Candidate Config): {ok_delete} rule.\n"
-               f"Tổng thành công: {total_ok} rule. Lỗi: {len(fail)} rule.")
+               f"Bị loại khi xác minh lại (config đã đổi từ lúc Check): {filtered_verify} rule.\n"
+               f"Bỏ qua vì đã ở trạng thái mong muốn sẵn: {skipped_already} rule.\n"
+               f"Tổng thành công: {total_ok} rule. Lỗi API: {len(fail)} rule.")
         for name, err in fail[:10]:
             msg += f"\n  - {name}: {err}"
         if len(fail) > 10:

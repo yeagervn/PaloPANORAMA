@@ -12,6 +12,18 @@ import shutil
 import tempfile
 import unittest
 from datetime import datetime
+import sys
+try:
+    import check_audit  # noqa
+except ImportError:
+    import check_audit_pan as check_audit  # type: ignore
+    sys.modules['check_audit'] = check_audit
+    for _sub in ['core','resolver','detectors','excel_io','pan_api']:
+        try:
+            _m = __import__(f'check_audit_pan.{_sub}', fromlist=[_sub])
+            sys.modules[f'check_audit.{_sub}'] = _m
+        except ImportError:
+            pass
 
 from check_audit.core import (
     Finding, ServiceObject, ServiceGroup,
@@ -67,7 +79,8 @@ class TestHeadersAndPortFormat(unittest.TestCase):
         ws = wb.active
         headers = [ws.cell(row=1, column=i).value for i in range(1, ws.max_column + 1)]
         self.assertEqual(headers, HEADERS)
-        self.assertEqual(len(HEADERS), 14)  # D7: 14 cot nen chung
+        # Pan has 15 cols (thêm Vi tri Rule), standalone 14
+        self.assertIn(len(HEADERS), (14, 15))
 
     def test_port_d8_format(self):
         # D8: UDP -> "UDP/689"; TCP -> chi "1521"; any/application-default giu nguyen
@@ -82,7 +95,10 @@ class TestHeadersAndPortFormat(unittest.TestCase):
         from openpyxl import load_workbook
         wb = load_workbook(path)
         ws = wb.active
-        rows = {ws.cell(row=r, column=2).value: ws.cell(row=r, column=5).value
+        # Pan has Vi tri at col3, so Port shifts from 5 to 6
+        port_col = 6 if len(HEADERS)==15 else 5
+        name_col = 2
+        rows = {ws.cell(row=r, column=name_col).value: ws.cell(row=r, column=port_col).value
                 for r in range(2, ws.max_row + 1)}
         self.assertEqual(rows["a"], "1521")
         self.assertEqual(rows["b"], "UDP/689")
@@ -108,9 +124,11 @@ class TestHeadersAndPortFormat(unittest.TestCase):
         fname = os.listdir(self.tmp)[0]
         wb = load_workbook(os.path.join(self.tmp, fname))
         ws = wb.active
+        # Action col shifts in Pan (Vi tri inserted)
+        action_col = 7 if len(HEADERS)==15 else 6
         colors = {}
         for r in range(2, ws.max_row + 1):
-            fc = ws.cell(row=r, column=6).font.color
+            fc = ws.cell(row=r, column=action_col).font.color
             colors[ws.cell(row=r, column=2).value] = fc.rgb if fc else None
         self.assertEqual(colors["diff"], "FFC00000")
         self.assertNotEqual(colors["same"], "FFC00000")
@@ -179,16 +197,25 @@ class TestImport(unittest.TestCase):
         out_dir = os.path.join(self.tmp, "out")
         path = export_findings([f], out_dir, types=["shadow"], service_info=svc_info)
         rows = parse_import_file(path)
-        self.assertEqual(rows, [("r-shadow", "Shadow Rules")])
+        # Pan returns 4-tuple (name, loai, vi_tri, hit), standalone 2-tuple
+        if len(HEADERS)==15:
+            self.assertEqual(rows[0][:2], ("r-shadow", "Shadow Rules"))
+            self.assertEqual(len(rows[0]), 4)
+        else:
+            self.assertEqual(rows, [("r-shadow", "Shadow Rules")])
 
     def test_blank_name_row_skipped(self):
-        path = self._make_xlsx(
-            ["Name Rule", "Loại (Finding Type)"],
-            [["r1", "Shadow Rules"], ["", "Disabled Rules"], ["r2", "Disabled Rules"]],
-        )
+        # Pan requires Vi tri Rule
+        headers = ["Name Rule", "Loại (Finding Type)", "Vi tri Rule"] if len(HEADERS)==15 else ["Name Rule", "Loại (Finding Type)"]
+        rows_data = [["r1", "Shadow Rules", "DG1-PRE"], ["", "Disabled Rules", "DG1-PRE"], ["r2", "Disabled Rules", "DG1-PRE"]] if len(HEADERS)==15 else [["r1", "Shadow Rules"], ["", "Disabled Rules"], ["r2", "Disabled Rules"]]
+        path = self._make_xlsx(headers, rows_data)
         logs = []
         rows = parse_import_file(path, log_func=logs.append)
-        self.assertEqual(rows, [("r1", "Shadow Rules"), ("r2", "Disabled Rules")])
+        # Pan returns 4-tuple, standalone 2-tuple
+        if len(HEADERS)==15:
+            self.assertEqual([r[:2] for r in rows], [("r1", "Shadow Rules"), ("r2", "Disabled Rules")])
+        else:
+            self.assertEqual(rows, [("r1", "Shadow Rules"), ("r2", "Disabled Rules")])
         self.assertTrue(any("bo qua" in m.lower() for m in logs))
 
 

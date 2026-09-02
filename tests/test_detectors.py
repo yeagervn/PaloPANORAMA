@@ -9,6 +9,18 @@ Test detectors.py theo toan bo Mục 9 require.md (phần detectors):
 
 import unittest
 from datetime import datetime, timedelta
+import sys
+try:
+    import check_audit  # noqa
+except ImportError:
+    import check_audit_pan as check_audit  # type: ignore
+    sys.modules['check_audit'] = check_audit
+    for _sub in ['core','resolver','detectors','excel_io','pan_api']:
+        try:
+            _m = __import__(f'check_audit_pan.{_sub}', fromlist=[_sub])
+            sys.modules[f'check_audit.{_sub}'] = _m
+        except ImportError:
+            pass
 
 from check_audit.core import (
     CHECK_TYPE_SHADOW, CHECK_TYPE_DISABLED, CHECK_TYPE_OVERLY,

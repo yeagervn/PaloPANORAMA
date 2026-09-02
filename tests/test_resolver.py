@@ -6,6 +6,18 @@ Kiem tra resolve group de quy, chong circular, fqdn bo qua, va y nghia
 """
 
 import unittest
+import sys
+try:
+    import check_audit  # noqa
+except ImportError:
+    import check_audit_pan as check_audit  # type: ignore
+    sys.modules['check_audit'] = check_audit
+    for _sub in ['core','resolver','detectors','excel_io','pan_api']:
+        try:
+            _m = __import__(f'check_audit_pan.{_sub}', fromlist=[_sub])
+            sys.modules[f'check_audit.{_sub}'] = _m
+        except ImportError:
+            pass
 
 from check_audit.core import AddressObject, AddressGroup, ServiceObject, ServiceGroup
 from check_audit.resolver import GroupResolver, ServiceResolver

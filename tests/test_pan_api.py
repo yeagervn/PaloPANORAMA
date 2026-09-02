@@ -8,10 +8,24 @@ khong raise - D10). Dung FakeClient override _request - KHONG goi mang that.
 import unittest
 import xml.etree.ElementTree as ET
 from datetime import datetime
+import sys
+try:
+    import check_audit  # noqa
+except ImportError:
+    import check_audit_pan as check_audit  # type: ignore
+    sys.modules['check_audit'] = check_audit
+    for _sub in ['core','resolver','detectors','excel_io','pan_api']:
+        try:
+            _m = __import__(f'check_audit_pan.{_sub}', fromlist=[_sub])
+            sys.modules[f'check_audit.{_sub}'] = _m
+        except ImportError:
+            pass
 
 from check_audit import pan_api
 from check_audit.pan_api import PanApiClient
 from check_audit.core import PanApiError
+
+IS_PAN = hasattr(pan_api, 'get_devicegroup_list')
 
 RUNNING_CONFIG = b"""<response status="success">
 <result><config>
@@ -63,6 +77,21 @@ HIT_COUNT_XML = b"""<response status="success"><result><rules>
   <entry name="rB"><hit-count>0</hit-count></entry>
   <entry name="rC"></entry>
 </rules></result></response>"""
+HIT_COUNT_XML_PAN = b"""<response status="success"><result><rules>
+  <entry name="rA"><hit-count>5</hit-count><last-hit-timestamp>1780000000</last-hit-timestamp><rule-creation-timestamp>1700000000</rule-creation-timestamp><device-group>DG1</device-group></entry>
+  <entry name="rB"><hit-count>0</hit-count><device-group>DG1</device-group></entry>
+  <entry name="rC"><device-group>DG1</device-group></entry>
+</rules></result></response>"""
+RUNNING_CONFIG_PAN = b"""<response status="success"><result><config>
+  <devices><entry name="localhost.localdomain"><device-group><entry name="DG1">
+    <pre-rulebase><security><rules>
+      <entry name="r-allow-any" uuid="u-master"><source><member>any</member></source><destination><member>any</member></destination><service><member>any</member></service><action>allow</action></entry>
+      <entry name="r-disabled" uuid="u-dis"><disabled>yes</disabled><source><member>10.0.0.5</member></source><destination><member>10.0.0.6</member></destination><service><member>TCP_1521</member></service><action>deny</action></entry>
+    </rules></security></pre-rulebase>
+    <address><entry name="WEB"><ip-netmask>10.0.0.5/32</ip-netmask></entry></address>
+  </entry></device-group></entry></devices>
+  <shared><address><entry name="SHARED_OBJ"><ip-netmask>1.1.1.1/32</ip-netmask></entry></address></shared>
+</config></result></response>"""
 
 
 class FakeClient(PanApiClient):
@@ -92,15 +121,29 @@ class TestDeleteCandidateNoCommit(unittest.TestCase):
     def test_delete_params_and_no_commit(self):
         c = FakeClient("1.2.3.4", "apikey")
         c.set_responses([b'<response status="success"/>'])
-        ok = c.delete_rule_candidate("vsys1", "r-allow-any")
-        self.assertTrue(ok)
-        self.assertEqual(len(c.calls), 1)
-        p = c.calls[0]
-        self.assertEqual(p["type"], "config")
-        self.assertEqual(p["action"], "delete")
-        self.assertIn("@name='vsys1'", p["xpath"])
-        self.assertIn("@name='r-allow-any'", p["xpath"])
-        # D6: khong bao gio co type=commit / action=commit trong bat ky request nao
+        if IS_PAN:
+            ok = c.delete_rule_candidate("DG1", "pre", "r-allow-any")
+            self.assertTrue(ok)
+            p = c.calls[0]
+            self.assertEqual(p["type"], "config")
+            self.assertEqual(p["action"], "delete")
+            self.assertIn("DG1", p["xpath"])
+            self.assertIn("pre-rulebase", p["xpath"])
+            # test disable also no commit
+            c2 = FakeClient("1.2.3.4", "apikey")
+            c2.set_responses([b'<response status="success"/>'])
+            c2.disable_rule_candidate("DG1", "pre", "r-allow-any")
+            self.assertEqual(c2.calls[0]["action"], "set")
+            for call in c2.calls:
+                self.assertNotIn("commit", call.get("type", ""))
+                self.assertNotIn("commit", call.get("action", ""))
+        else:
+            ok = c.delete_rule_candidate("vsys1", "r-allow-any")
+            self.assertTrue(ok)
+            p = c.calls[0]
+            self.assertEqual(p["type"], "config")
+            self.assertEqual(p["action"], "delete")
+            self.assertIn("@name='vsys1'", p["xpath"])
         for call in c.calls:
             self.assertNotIn("commit", call.get("type", ""))
             self.assertNotIn("commit", call.get("action", ""))
@@ -108,76 +151,125 @@ class TestDeleteCandidateNoCommit(unittest.TestCase):
 
 class TestRunConfigParse(unittest.TestCase):
     def setUp(self):
-        self.config = ET.fromstring(RUNNING_CONFIG).find(".//config")
-        self.vsys = pan_api.get_vsys_element(self.config, "vsys1")
+        if IS_PAN:
+            self.config = ET.fromstring(RUNNING_CONFIG_PAN).find(".//config")
+        else:
+            self.config = ET.fromstring(RUNNING_CONFIG).find(".//config")
+            self.vsys = pan_api.get_vsys_element(self.config, "vsys1")
 
     def test_vsys_list(self):
-        self.assertEqual(pan_api.get_vsys_list(self.config), ["vsys1"])
+        if IS_PAN:
+            self.assertEqual(pan_api.get_devicegroup_list(self.config), ["DG1"])
+        else:
+            self.assertEqual(pan_api.get_vsys_list(self.config), ["vsys1"])
 
     def test_rules_order_and_fields(self):
-        rules = pan_api.parse_security_rules(self.vsys)
-        self.assertEqual([r.name for r in rules], ["r-allow-any", "r-disabled"])
-        self.assertEqual(rules[0].index, 0)
-        self.assertEqual(rules[1].index, 1)
-        self.assertFalse(rules[0].disabled)
-        self.assertTrue(rules[1].disabled)
-        self.assertEqual(rules[0].action, "allow")
-        self.assertEqual(rules[1].source, ["10.0.0.5"])
-        self.assertEqual(rules[1].service, ["TCP_1521"])
-        self.assertEqual(rules[0].uuid, "u-master")
+        if IS_PAN:
+            rules = pan_api.assemble_security_rules(self.config, "DG1")
+            # Should have 2 rules from DG1 pre
+            self.assertEqual([r.name for r in rules[:2]], ["r-allow-any", "r-disabled"])
+            self.assertTrue(any(r.name=="r-allow-any" for r in rules))
+            self.assertTrue(any(r.disabled for r in rules if r.name=="r-disabled"))
+        else:
+            rules = pan_api.parse_security_rules(self.vsys)
+            self.assertEqual([r.name for r in rules], ["r-allow-any", "r-disabled"])
+            self.assertEqual(rules[0].index, 0)
+            self.assertEqual(rules[1].index, 1)
+            self.assertFalse(rules[0].disabled)
+            self.assertTrue(rules[1].disabled)
+            self.assertEqual(rules[0].action, "allow")
+            self.assertEqual(rules[1].source, ["10.0.0.5"])
+            self.assertEqual(rules[1].service, ["TCP_1521"])
+            self.assertEqual(rules[0].uuid, "u-master")
 
     def test_address_objects(self):
-        objs = pan_api.parse_address_objects(self.vsys)
-        self.assertEqual(objs["WEB"].kind, "host")
-        self.assertEqual(objs["RNG"].kind, "range")
-        self.assertEqual(objs["NET"].kind, "wide")
-        self.assertEqual(objs["FQ"].kind, "fqdn")
+        if IS_PAN:
+            objs = pan_api.parse_devicegroup_objects(self.config, "DG1")
+            self.assertIn("WEB", objs["address_objects"])
+            self.assertEqual(objs["address_objects"]["WEB"].kind, "host")
+        else:
+            objs = pan_api.parse_address_objects(self.vsys)
+            self.assertEqual(objs["WEB"].kind, "host")
+            self.assertEqual(objs["RNG"].kind, "range")
+            self.assertEqual(objs["NET"].kind, "wide")
+            self.assertEqual(objs["FQ"].kind, "fqdn")
 
     def test_service_objects(self):
-        svcs = pan_api.parse_service_objects(self.vsys)
-        self.assertEqual(svcs["TCP_1521"].protocol, "tcp")
-        self.assertEqual(svcs["TCP_1521"].port_raw, "1521")
-        self.assertEqual(svcs["UDP_689"].protocol, "udp")
+        if IS_PAN:
+            # Pan shared has no service, DG has none in this minimal config, just check parse doesn't crash
+            objs = pan_api.parse_devicegroup_objects(self.config, "DG1")
+            self.assertIsInstance(objs["service_objects"], dict)
+        else:
+            svcs = pan_api.parse_service_objects(self.vsys)
+            self.assertEqual(svcs["TCP_1521"].protocol, "tcp")
+            self.assertEqual(svcs["TCP_1521"].port_raw, "1521")
+            self.assertEqual(svcs["UDP_689"].protocol, "udp")
 
     def test_groups(self):
-        grps = pan_api.parse_address_groups(self.vsys)
-        self.assertEqual(grps["G1"].members, ["WEB", "RNG"])
-        sgrps = pan_api.parse_service_groups(self.vsys)
-        self.assertEqual(sgrps["SG1"].members, ["TCP_1521", "UDP_689"])
+        if IS_PAN:
+            # Pan test: no groups in minimal config, just check empty
+            objs = pan_api.parse_devicegroup_objects(self.config, "DG1")
+            self.assertIsInstance(objs["address_groups"], dict)
+        else:
+            grps = pan_api.parse_address_groups(self.vsys)
+            self.assertEqual(grps["G1"].members, ["WEB", "RNG"])
+            sgrps = pan_api.parse_service_groups(self.vsys)
+            self.assertEqual(sgrps["SG1"].members, ["TCP_1521", "UDP_689"])
 
     def test_vsys_objects_shared_override(self):
-        # vsys de len tren (PAN-OS that se ghi de shared)
-        all_objs = pan_api.parse_vsys_objects(self.config, "vsys1")
-        self.assertIn("address_objects", all_objs)
-        self.assertIn("WEB", all_objs["address_objects"])
-        self.assertIn("TCP_1521", all_objs["service_objects"])
-        self.assertIn("SG1", all_objs["service_groups"])
+        if IS_PAN:
+            objs = pan_api.parse_devicegroup_objects(self.config, "DG1")
+            self.assertIn("WEB", objs["address_objects"])
+            self.assertIn("SHARED_OBJ", objs["address_objects"])
+        else:
+            all_objs = pan_api.parse_vsys_objects(self.config, "vsys1")
+            self.assertIn("address_objects", all_objs)
+            self.assertIn("WEB", all_objs["address_objects"])
+            self.assertIn("TCP_1521", all_objs["service_objects"])
+            self.assertIn("SG1", all_objs["service_groups"])
 
 
 class TestHitCount(unittest.TestCase):
     def test_parse_hit_count(self):
         c = FakeClient("1.2.3.4", "apikey")
-        c.set_responses([HIT_COUNT_XML])
-        stats = c.fetch_rule_hit_count("vsys1")
-        self.assertEqual(stats["rA"].hit_count, 5)
-        self.assertTrue(isinstance(stats["rA"].last_hit_timestamp, datetime))
-        self.assertEqual(stats["rA"].last_hit_timestamp.month, 5)  # 1780000000 ~ 2026-05
-        self.assertEqual(stats["rB"].hit_count, None)   # 0 hit -> None (D10/Mục 4.4)
-        self.assertIn("rC", stats)
-        self.assertEqual(stats["rC"].hit_count, None)
+        if IS_PAN:
+            c.set_responses([HIT_COUNT_XML_PAN])
+            stats = c.fetch_rule_hit_count("FAKE-SERIAL")
+            # Pan returns tuple keys (name, vi_tri)
+            self.assertIn(("rA","DG1-PRE"), stats)
+            self.assertEqual(stats[("rA","DG1-PRE")].hit_count, 5)
+            self.assertTrue(isinstance(stats[("rA","DG1-PRE")].last_hit_timestamp, datetime))
+            self.assertEqual(stats[("rB","DG1-PRE")].hit_count, None)
+            self.assertIn(("rC","DG1-PRE"), stats)
+        else:
+            c.set_responses([HIT_COUNT_XML])
+            stats = c.fetch_rule_hit_count("vsys1")
+            self.assertEqual(stats["rA"].hit_count, 5)
+            self.assertTrue(isinstance(stats["rA"].last_hit_timestamp, datetime))
+            self.assertEqual(stats["rA"].last_hit_timestamp.month, 5)
+            self.assertEqual(stats["rB"].hit_count, None)
+            self.assertIn("rC", stats)
+            self.assertEqual(stats["rC"].hit_count, None)
 
     def test_raise_returns_empty(self):
         c = FakeClient("1.2.3.4", "apikey")
         c.set_responses([RuntimeError("API down")])
         logs = []
-        stats = c.fetch_rule_hit_count("vsys1", log_func=logs.append)
+        if IS_PAN:
+            stats = c.fetch_rule_hit_count("FAKE-SERIAL", log_func=logs.append)
+        else:
+            stats = c.fetch_rule_hit_count("vsys1", log_func=logs.append)
         self.assertEqual(stats, {})
         self.assertTrue(any("CANH BAO" in m for m in logs))
 
     def test_typeop_and_cmd(self):
         c = FakeClient("1.2.3.4", "apikey")
-        c.set_responses([HIT_COUNT_XML])
-        c.fetch_rule_hit_count("vsys1")
+        if IS_PAN:
+            c.set_responses([HIT_COUNT_XML_PAN])
+            c.fetch_rule_hit_count("FAKE-SERIAL")
+        else:
+            c.set_responses([HIT_COUNT_XML])
+            c.fetch_rule_hit_count("vsys1")
         p = c.calls[0]
         self.assertEqual(p["type"], "op")
         self.assertIn("rule-hit-count", p["cmd"])

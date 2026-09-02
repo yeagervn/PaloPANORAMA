@@ -10,7 +10,7 @@ detectors.py - 3 ham phat hien cua CHECK AUDIT (Mục 4 require.md):
 """
 
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from .core import (
     Finding, RuleSnapshot, RuleHitStat,
@@ -114,10 +114,13 @@ def _resolve_entries(entries: List[str], resolver) -> ResolvedAddr:
 # 4.3 NHANH UNREACHABLE
 # ============================================================================
 def _zones_cover(z1: List[str], z2: List[str]) -> bool:
-    """R1.from_zones cover R2.from_zones (any o 1 trong 2 ben, hoac R1 chua 'any',
-    hoac tap zone R1 supertable tap zone R2)."""
-    if "any" in z1 or "any" in z2:
+    """R1.from_zones cover R2.from_zones: R1 cover R2 nếu R1=any (bất kể R2), ngược lại
+    nếu R2=any mà R1 không phải any thì R1 không cover (sửa audit 2026-09-02: trước đây
+    `if \"any\" in z1 or \"any\" in z2: return True` gây false-positive khi R2=any còn R1 cụ thể)."""
+    if "any" in z1:
         return True
+    if "any" in z2:
+        return False
     return set(z1) >= set(z2)
 
 
@@ -154,48 +157,65 @@ def _covers_rule(r1: RuleSnapshot, r2: RuleSnapshot) -> bool:
     return True
 
 
-def _find_unreachable_rules(rules: List[RuleSnapshot], resolver, svc_resolver) -> Dict[str, dict]:
+def _find_unreachable_rules(rules: List[RuleSnapshot], resolver, svc_resolver) -> Dict[Tuple[str, str], dict]:
     """
     Rule R2 (index i2) bi che khuat boi R1 (index i1 < i2) khi VA CHI KHI toan
     bo 5 dieu kien o Mục 4.3. Rule dau tien (index nho nhat) thoa -> duoc chon,
     dung tim ngay (break) - dung thu tu PAN-OS danh gia rule.
-    Tra ve Dict[rule_name -> {shadowed_by_rule_name, shadowed_by_rule_index,
+    SỬA 2026-09-02 (lỗ hổng D9): khoá theo (rule_name, vi_tri) thay vì tên thuần,
+    để phân biệt 2 rule trùng tên ở 2 DG khác nhau. Giữ thêm khoá tên thuần khi
+    vi_tri rỗng để tương thích test cũ standalone.
+    Tra ve Dict[(rule_name, vi_tri) -> {shadowed_by_rule_name, shadowed_by_rule_index,
     same_action, detail_fragment}].
     """
     _resolve_rules(rules, resolver, svc_resolver)
 
-    shadow: Dict[str, dict] = {}
+    shadow: Dict[Tuple[str, str], dict] = {}
     for i2 in range(len(rules)):
         r2 = rules[i2]
         for i1 in range(i2):
             r1 = rules[i1]
             if not _covers_rule(r1, r2):
                 continue
-            shadow[r2.name] = {
+            entry = {
                 "shadowed_by_rule_name": r1.name,
                 "shadowed_by_rule_index": r1.index,
                 "same_action": (r1.action == r2.action),
                 "detail_fragment": _unreachable_detail_fragment(r1, r2),
             }
+            shadow[(r2.name, r2.vi_tri)] = entry
+            # backward compat cho test cũ khi vi_tri rỗng
+            if r2.vi_tri == "":
+                shadow[r2.name] = entry  # type: ignore
             break  # tim thay R1 dau tien la du - khong can quet tiep
-    return shadow
+    return shadow  # type: ignore
 
 
 # ============================================================================
 # 4.4 NHANH UNUSED (No Hits) - du lieu chi lay tu Policy Optimizer rule-hit-count
 # ============================================================================
-def _find_unused_rules(rules: List[RuleSnapshot], hit_stats: Dict[str, RuleHitStat],
-                       now: NOW_TYPE) -> Dict[str, dict]:
+def _find_unused_rules(rules: List[RuleSnapshot], hit_stats: Dict[Tuple[str, str], RuleHitStat],
+                       now: NOW_TYPE) -> Dict[Tuple[str, str], dict]:
     """
     Nguong CO DINH 30 ngay (UNUSED_RULE_THRESHOLD_DAYS). Rule khong co du lieu
     hit (stat None) -> bo qua, khong doan. hit_stats rong (API khong ho tro) ->
     ham nay khong sinh ket qua gi, nhanh UNREACHABLE van chay doc lap (D10).
+    SỬA 2026-09-02: hit_stats khoá theo (rule_name, vi_tri) để xử lý trùng tên khác DG (D9).
     """
-    result: Dict[str, dict] = {}
+    result: Dict[Tuple[str, str], dict] = {}
+    # Hỗ trợ cả hit_stats cũ khoá tên thuần (standalone tests) và mới khoá (name, vi_tri)
+    has_string_keys = any(isinstance(k, str) for k in hit_stats.keys()) if hit_stats else False
     for r in rules:
-        stat = hit_stats.get(r.name)
+        stat = hit_stats.get((r.name, r.vi_tri))
+        if stat is None and has_string_keys:
+            # fallback cho test cũ / standalone: khoá tên thuần
+            stat = hit_stats.get(r.name)  # type: ignore
         if stat is None:
-            continue
+            # thêm fallback cho vi_tri rỗng
+            if r.vi_tri == "":
+                stat = hit_stats.get((r.name, ""))  # type: ignore
+            if stat is None:
+                continue
 
         no_hit_days: Optional[int]
         if stat.hit_count and stat.hit_count > 0 and stat.last_hit_timestamp:
@@ -218,24 +238,29 @@ def _find_unused_rules(rules: List[RuleSnapshot], hit_stats: Dict[str, RuleHitSt
                 f"tạo lúc: {stat.rule_creation_date})"
             )
 
-        result[r.name] = {
+        entry = {
             "hit_count": stat.hit_count or 0,
             "last_hit_date": stat.last_hit_date,
             "rule_creation_date": stat.rule_creation_date,
             "no_hit_days": no_hit_days,
             "detail_fragment": reason_detail,
         }
-    return result
+        result[(r.name, r.vi_tri)] = entry
+        # backward compat cho test cũ standalone (khoá tên thuần) — chỉ khi vi_tri rỗng hoặc hit_stats cũ
+        if has_string_keys or r.vi_tri == "":
+            result[r.name] = entry  # type: ignore
+    return result  # type: ignore
 
 
 # ============================================================================
 # 4.5 SHADOW RULES - hop nhat 2 nhanh UNREACHABLE + UNUSED
 # ============================================================================
 def find_shadow_rules(rules: List[RuleSnapshot], resolver, svc_resolver,
-                      hit_stats: Dict[str, RuleHitStat], now: NOW_TYPE) -> List[Finding]:
+                      hit_stats: Dict[Tuple[str, str], RuleHitStat], now: NOW_TYPE) -> List[Finding]:
     """
     Ham public duy nhat gui.py goi cho tinh nang "Shadow Rules". 1 rule dinh ca
     2 ly do chi tao DUNG 1 Finding, detail noi ca 2 mo ta bang dau " | ".
+    SỬA 2026-09-02: hit_stats và unused_map khoá theo (rule_name, vi_tri) (D9).
     """
     unreachable_map = _find_unreachable_rules(rules, resolver, svc_resolver)
     unused_map = _find_unused_rules(rules, hit_stats, now)
@@ -244,13 +269,21 @@ def find_shadow_rules(rules: List[RuleSnapshot], resolver, svc_resolver,
     for r in rules:
         reasons: List[str] = []
         detail_parts: List[str] = []
-
-        if r.name in unreachable_map:
+        _unreach_key = (r.name, r.vi_tri)
+        _unreach_entry = unreachable_map.get(_unreach_key)
+        if _unreach_entry is None:
+            _unreach_entry = unreachable_map.get(r.name)  # type: ignore  # fallback
+        if _unreach_entry is not None:
             reasons.append(SHADOW_UNREACHABLE)
-            detail_parts.append(unreachable_map[r.name]["detail_fragment"])
-        if r.name in unused_map:
+            detail_parts.append(_unreach_entry["detail_fragment"])
+        # hỗ trợ cả khoá tuple mới và khoá string cũ
+        _unused_key = (r.name, r.vi_tri)
+        _unused_entry = unused_map.get(_unused_key)
+        if _unused_entry is None:
+            _unused_entry = unused_map.get(r.name)  # type: ignore  # fallback standalone
+        if _unused_entry is not None:
             reasons.append(SHADOW_UNUSED)
-            detail_parts.append(unused_map[r.name]["detail_fragment"])
+            detail_parts.append(_unused_entry["detail_fragment"])
         if not reasons:
             continue
 
@@ -268,13 +301,21 @@ def find_shadow_rules(rules: List[RuleSnapshot], resolver, svc_resolver,
             shadow_reasons=reasons,
         )
         if SHADOW_UNREACHABLE in reasons:
-            f.shadowed_by_rule_name = unreachable_map[r.name]["shadowed_by_rule_name"]
-            f.shadowed_by_rule_index = unreachable_map[r.name]["shadowed_by_rule_index"]
-            f.same_action = unreachable_map[r.name]["same_action"]
+            _ue2 = unreachable_map.get((r.name, r.vi_tri))
+            if _ue2 is None:
+                _ue2 = unreachable_map.get(r.name)  # type: ignore
+            f.shadowed_by_rule_name = _ue2["shadowed_by_rule_name"]  # type: ignore
+            f.shadowed_by_rule_index = _ue2["shadowed_by_rule_index"]  # type: ignore
+            f.same_action = _ue2["same_action"]  # type: ignore
         if SHADOW_UNUSED in reasons:
-            f.hit_count = unused_map[r.name]["hit_count"]
-            f.last_hit_date = unused_map[r.name]["last_hit_date"]
-            f.rule_creation_date = unused_map[r.name]["rule_creation_date"]
-            f.no_hit_days = unused_map[r.name]["no_hit_days"]
+            _ue = unused_map.get((r.name, r.vi_tri))
+            if _ue is None:
+                _ue = unused_map.get(r.name)  # type: ignore
+            f.hit_count = _ue["hit_count"]  # type: ignore
+            f.last_hit_date = _ue["last_hit_date"]  # type: ignore
+            f.rule_creation_date = _ue["rule_creation_date"]  # type: ignore
+            f.no_hit_days = _ue["no_hit_days"]  # type: ignore
+        # Gan vi_tri cho Finding để gui dùng cho xác minh batch
+        f.vi_tri = r.vi_tri
         out.append(f)
     return out

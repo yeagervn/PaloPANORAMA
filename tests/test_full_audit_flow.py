@@ -75,9 +75,9 @@ r4.resolved_destination = ResolvedAddr(is_any=True)
 r4.resolved_service = ResolvedService(is_any=True)
 rules.append(r4)
 
-# detectors
+# detectors - SỬA 2026-09-02: hit_stats khoá (name, vi_tri)
 shadow_hits = {
-    "R2-SHADOW-HIT0": __import__('check_audit_pan.core', fromlist=['RuleHitStat']).RuleHitStat(0, None, datetime.datetime.now() - datetime.timedelta(days=45))
+    ("R2-SHADOW-HIT0", "DG1-PRE"): __import__('check_audit_pan.core', fromlist=['RuleHitStat']).RuleHitStat(0, None, datetime.datetime.now() - datetime.timedelta(days=45))
 }
 shadow_findings = find_shadow_rules(rules, None, None, shadow_hits, datetime.datetime.now())
 disabled_findings = find_disabled_rules(rules)

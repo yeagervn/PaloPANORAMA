@@ -4,9 +4,13 @@ Nhanh test: phu de nen (helpers) cho cac test cua check_audit.
 """
 
 import ipaddress
-
-from check_audit.core import RuleSnapshot, RuleHitStat
-from check_audit.resolver import ResolvedAddr, ResolvedService
+import sys
+try:
+    from check_audit.core import RuleSnapshot, RuleHitStat
+    from check_audit.resolver import ResolvedAddr, ResolvedService
+except ImportError:
+    from check_audit_pan.core import RuleSnapshot, RuleHitStat
+    from check_audit_pan.resolver import ResolvedAddr, ResolvedService
 
 
 def ip_int(ip: str) -> int:

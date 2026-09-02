@@ -454,6 +454,8 @@ của Target Firewall** giống 0.6 — không có Target → so sánh Zone luô
 (fallback về hành vi cũ trước khi có Zone awareness, KHÔNG chặn audit chạy, chỉ giảm độ chính
 xác của điều kiện 1/2 trong 5 điều kiện superset — cảnh báo rõ trong log khi thiếu Target).
 
+> **SỬA 2026-09-02 audit #1 (lỗ hổng D9 còn sót):** `_find_unreachable_rules()` trước đây khoá `shadow` theo tên thuần `r2.name`, nay **đã sửa khoá theo `(r2.name, r2.vi_tri)`** đồng bộ với `_find_unused_rules` (vốn đã sửa ở bản 2026-09-02). Mọi tra cứu `unreachable_map` trong `find_shadow_rules` cũng đổi sang `(r.name, r.vi_tri)` + fallback tên thuần cho test cũ. Nếu không sửa, 2 rule cùng tên ở 2 DG khác nhau sẽ ghi đè nhau trong dict, dẫn tới gán sai `shadowed_by_rule_name` hoặc làm mất Finding — lỗi nằm ngay cạnh đoạn vừa sửa cho nhánh UNUSED nên dễ bỏ sót khi review diff.
+
 ## IV.3. Giao diện — 5 khung
 
 **Khung 1**: đổi `Management IP` → `Panorama IP`; thêm dropdown **Device Group** (bắt buộc, thay
@@ -480,15 +482,14 @@ Shared-PRE/`<DG>`-PRE/`<DG>`-POST/Shared-POST) — bắt buộc cho Import (IV.4
 nay bắt buộc đủ 3 cột `Name Rule` + `Loại (Finding Type)` + `Vi tri Rule` (thiếu → raise lỗi rõ
 ràng, giữ nguyên nguyên tắc validate nghiêm ngặt của bản gốc chỉ mở rộng thêm 1 cột bắt buộc).
 
-## IV.6. `pan_api.py` — API rules bắt buộc (bản Panorama)
+## IV.6. `pan_api.py` — API rules bắt buộc (bản Panorama) — cập nhật 2026-09-02 sửa lỗ hổng D9
 
 1. `delete_rule_candidate(panorama_ip, api_key, devicegroup, rulebase, rule_name, verify_ssl)` —
    KHÔNG request nào chứa `type=commit` — giữ nguyên. Dùng cho **Disabled Rules → Delete**.
 2. `disable_rule_candidate(panorama_ip, api_key, devicegroup, rulebase, rule_name, verify_ssl)` — **mới từ 2026-08-29** cho **Shadow hit==0 → Disable**: `type=config&action=set&xpath=.../disabled&element=<disabled>yes</disabled>`, KHÔNG commit/push.
-3. `fetch_rule_hit_count(panorama_ip, api_key, target_serial, verify_ssl, log_func)` — bắt buộc
-   `target_serial`; thiếu → trả `{}` ngay không gọi API (0.7); lỗi/không hỗ trợ → log cảnh báo +
-   `{}` — giữ nguyên D10.
-4. `get_devicegroup_list()` / `resolve_devicegroup_chain(dg_name)` (thay `get_vsys_list()`) /
+3. `fetch_rule_hit_count(panorama_ip, api_key, target_serial, verify_ssl, log_func) -> Dict[Tuple[str,str], RuleHitStat]` — **SỬA 2026-09-02 (lỗ hổng D9)**: trước đây trả `Dict[str, RuleHitStat]` khoá theo tên thuần, nay **bắt buộc khoá theo `(rule_name, vi_tri)`** với `vi_tri` ∈ {`Shared-PRE`/`Shared-POST`/`DG-PRE`/`DG-POST`} (IV.5) để phân biệt 2 rule cùng tên ở 2 Device Group khác nhau (Panorama cho phép trùng tên, khác standalone phẳng). Thiếu `target_serial` → `{}` degrade im lặng (0.7); lỗi API → log cảnh báo + `{}` best-effort (D10) — không đổi hành vi, chỉ đổi khoá. Mọi nơi gọi (detectors/`find_shadow_rules` và `gui._delete_worker`) đã rà soát cập nhật tra cứu theo khoá mới.
+4. `fetch_current_rule_states(panorama_ip, api_key, verify_ssl, log_func) -> Optional[Dict[Tuple[str,str], dict]]` — **mới 2026-09-02 (IV.8)**: đọc **Candidate Config** (`action=get`, 4 lệnh cố định, xem IV.8) để xác minh tồn tại/trạng thái ngay trước khi ghi. Xem chi tiết IV.8.
+5. `get_devicegroup_list()` / `resolve_devicegroup_chain(dg_name)` (thay `get_vsys_list()`) /
    `parse_security_rules()` gọi cho từng phần tử trong chuỗi + Shared, cả pre lẫn post, rồi lắp
    ráp theo 0.3 (thay `get_vsys_element()`/1-lần-parse cũ) / `parse_devicegroup_objects()` (thay
    `parse_vsys_objects()`, đọc theo chuỗi thừa kế 0.2).
@@ -510,6 +511,103 @@ ràng, giữ nguyên nguyên tắc validate nghiêm ngặt của bản gốc ch�
 7. **Mới**: audit không xét rule cục bộ cấu hình trực tiếp trên firewall (ngoài tầm Panorama) —
    giống giới hạn III.10 mục 2.
 
+## IV.8 — Xác minh lại theo batch trước khi Disable/Delete (mới 2026-09-02, chi phí cố định, không đổi detector/format/xpath)
+
+**Bối cảnh & lỗ hổng đã sửa:** `fetch_rule_hit_count()` trước 2026-09-02 trả `Dict[str, RuleHitStat]` khoá theo tên thuần, vi phạm D9 khi 2 Device Group khác nhau có rule trùng tên (Panorama cho phép, standalone không). Đã sửa thành `Dict[Tuple[str,str], RuleHitStat]` khoá `(rule_name, vi_tri)` — `vi_tri` tận dụng sẵn trong candidates tuple 6 phần tử `(name, loai, vi_tri, dg, rb, action)` (IV.4). Mọi dict/map trong tính năng mới này đều khoá theo `(rule_name, vi_tri)`, không khoá theo tên thuần.
+
+**Mục tiêu:** giảm rủi ro config đổi giữa `T0` (lúc Check) và `T1` (lúc thực thi Disable/Delete), giống Prompt A nhưng phải xử lý đặc thù Panorama: rulebase lắp ráp 6 bước (0.3), `target_serial` OPTIONAL (0.1/0.7), candidates đã có `vi_tri`/`dg`/`rb`.
+
+**Ràng buộc bắt buộc (không đổi):**
+- D6: tuyệt đối không `type=commit`/`action=commit` trong toàn bộ xác minh — chỉ `action=get`/`action=op` (đọc).
+- Đọc lại rule states dùng **Candidate Config** (`action=get`, không phải `action=show` Running Config) — ngoại lệ có chủ đích so với 0.4: cần trạng thái mới nhất kể cả thay đổi candidate chưa commit của người khác ngay trước khi ghi; Running Config vẫn là sole authority cho thuật toán LOCAL/Check.
+- Chi phí cố định **4–5 API call/batch** (4 cho `fetch_current_rule_states` + 1 cho `fetch_rule_hit_count` nếu có `target_serial`), không phụ thuộc số rule hay số Device Group — có test đo đếm.
+
+### IV.8.1 Chữ ký mới `gui.py`
+
+```python
+_delete_worker(self, candidates, mgmt_ip, api_key, verify_ssl, target_serial)
+```
+Thêm `target_serial: str` lấy đúng giá trị ô **Target Firewall (Serial)** trên GUI tại thời điểm bấm Xác nhận (có thể rỗng). Nơi gọi `_delete_worker` truyền thêm `self._target_serial`.
+
+### IV.8.2 Batch xác minh ngay trước loop (chỉ 1 lần/batch, không gọi trong loop)
+
+**a) Fresh Hit Stats (nếu có target):**
+```python
+if target_serial:
+    fresh_hit_stats = fetch_rule_hit_count(mgmt_ip, api_key, target_serial, verify_ssl, log_func)
+    # đã sửa D9 + audit #2: Dict[Tuple[str,str], RuleHitStat] khoá (rule_name, vi_tri)
+    # SỬA 2026-09-02 audit: bỏ cmd sai <device-group-name>/<serial>/<rule-base> generic,
+    # thay bằng 2 lệnh đúng <pre-rulebase> + <post-rulebase> với wildcard (target=<serial> ở tầng request quyết định firewall).
+    # Chi phí hit-count nay là 2 call (pre+post) thay vì 1, tổng batch 6 call (4 rule-states +2 hit) khi có target.
+else:
+    fresh_hit_stats = {}  # bỏ qua, không lỗi, degrade im lặng 0.7
+```
+Lỗi API (kể cả có target, 1 trong 2 lệnh pre/post) → best-effort, `log` cảnh báo, `fresh_hit_stats` chứa phần lấy được (có thể rỗng), không chặn batch.
+
+**b) Fresh Rule States (luôn thử, 4 lệnh cố định):**
+```python
+fresh_states = fetch_current_rule_states(panorama_ip, api_key, verify_ssl, log_func)
+# -> Optional[Dict[Tuple[str,str], dict]] khoá (rule_name, vi_tri)
+#    value: {"disabled":bool, "source":[...], "destination":[...], "service":[...], "action":str}
+```
+Chi tiết `fetch_current_rule_states()` trong `pan_api.py:IV.6.5`:
+- Gọi đúng **4 lệnh `action=get` cố định** (không phụ thuộc số DG/rule), xpath WILDCARD bỏ `[@name='DG']`:
+  1. `/config/shared/pre-rulebase/security/rules`
+  2. `/config/shared/post-rulebase/security/rules`
+  3. `/config/devices/entry[@name='localhost.localdomain']/device-group/entry/pre-rulebase/security/rules`
+  4. `/config/devices/entry[@name='localhost.localdomain']/device-group/entry/post-rulebase/security/rules`
+- Với (3)/(4): response trả nhiều `<device-group><entry name='DG_X'>…<pre-rulebase>…<rules><entry name='RULE_Y'>` — **phải parse giữ tên DG cha** (duyệt lồng nhau, không `findall(".//entry")` phẳng mất ngữ cảnh). Dựng `vi_tri` đúng format `Shared-PRE/<DG>-PRE/<DG>-POST/Shared-POST` để khớp candidates.
+- Với mỗi rule, đọc luôn trong cùng response (không thêm call): `<disabled>`, `<source>`, `<destination>`, `<service>`, `<action>` — lưu vào dict con cho bước lọc.
+- Lỗi bất kỳ trong 4 lệnh → best-effort, `log` cảnh báo, trả `None` (coi như không xác minh được), không chặn batch.
+
+### IV.8.3 Lọc tại chỗ trong loop (không gọi API thêm)
+
+```python
+for name, loai, vi_tri, dg, rb, action in candidates:  # giữ 6 phần tử hiện có
+    state = fresh_states.get((name, vi_tri)) if fresh_states is not None else None
+    # 1. Không còn tồn tại đúng (name, vi_tri) khi đã xác minh được
+    if fresh_states is not None and state is None:
+        # loại: "Rule không còn tồn tại đúng vị trí tại thời điểm thực thi"
+        continue
+    # 2. Disabled→delete nhưng đã enable lại
+    if action == "delete" and state is not None and state["disabled"] is False:
+        # loại: "Rule đã được enable lại, không còn là Disabled Rule"
+        continue
+    # 3. Shadow→disable nhưng đã disabled sẵn → bỏ qua an toàn, không fail, không gọi lại API
+    if action == "disable" and state is not None and state["disabled"] is True:
+        # log info "đã disabled sẵn, bỏ qua gọi API thừa", không đưa vào fail
+        continue
+    # 4. Shadow→disable nhưng Source/Destination/Service đã bị sửa (so list string thô, không resolve)
+    if action == "disable" and state is not None and \
+       (state["source"] != orig_source or state["destination"] != orig_destination or state["service"] != orig_service):
+        # loại: "Rule đã bị chỉnh sửa Source/Destination/Service từ lúc Check - cần Check lại"
+        continue
+    # 5. Shadow→disable + có target + có fresh_hit_stats + stat.hit_count is not None (D10: 0-hit luôn None)
+    #    → loại: "Hit Count đã thay đổi kể từ lúc Check - bỏ qua để an toàn"
+    if action == "disable" and target_serial and fresh_hit_stats and \
+       (stat := fresh_hit_stats.get((name, vi_tri))) is not None and stat.hit_count is not None:
+        continue
+    # ngược lại → tiếp tục gọi disable_rule_candidate()/delete_rule_candidate() như cũ
+```
+
+`orig_source/destination/service` là dữ liệu gốc lúc Check của candidate (lưu sẵn khi `find_*` hoặc từ `rule_by_key`), **SỬA 2026-09-02 audit: so sánh bằng `set()` thay vì `list` có thứ tự**, tránh coi là “đã sửa” chỉ vì PAN-OS trả `<member>` theo thứ tự khác.
+
+### IV.8.4 Báo cáo R4 (tách biệt)
+
+```
+Disable thành công: X rule.
+Delete thành công: Y rule.
+Bị loại khi xác minh lại (config đã đổi từ lúc Check): Z rule.
+Bỏ qua vì đã ở trạng thái mong muốn sẵn: W rule.
+Lỗi API: V rule.
+```
+`Z` là các case 1/2/4/5 trên; `W` là case 3 (đã disabled sẵn); `V` là lỗi khi gọi `disable/delete` thật; `not_found` lúc Import ban đầu vẫn riêng. Không đổi format Excel 15 cột hay xpath Disable/Delete hiện có.
+
+### IV.8.5 Các sửa nhỏ kèm audit 2026-09-02
+- `fetch_current_rule_states()` xoá nhánh chết `if not result or all(...): pass` (dead code) — không có fallback thực chất, dễ gây hiểu lầm.
+- `_on_import` bỏ chặn cứng “trùng tên ở bất kỳ DG nào cũng chặn” (kiểm tra `len([k for k in rule_by_key if k[0]==name])>1`): nay chỉ log cảnh báo nhưng vẫn cho phép xử lý chính xác theo `vi_tri` vì D9 đã sửa khoá `(name, vi_tri)`. Tránh “quá tay” làm giảm tự động hoá.
+- Tài liệu ghi rõ quy tắc “trùng tên chặn cả 2 phía” trước đây để tránh bối rối admin.
+
 ---
 
 # PHẦN V — NGUYÊN TẮC BẢO TRÌ CHUNG
@@ -520,17 +618,22 @@ chỉ thêm 1 dòng vào checklist V.3: **"Sửa gì liên quan tới nguồn d�
 Device Group, target)? → đọc lại PHẦN 0 trước khi sửa, đảm bảo không phá vỡ nguyên tắc lắp ráp
 0.3 hoặc thừa kế object 0.2."**
 
-## V.4 — Quy tắc đồng bộ tài liệu (BẮT BUỘC - hiệu lực từ 2026-08-29)
+## V.4 — Quy tắc đồng bộ tài liệu & Single-File (BẮT BUỘC - hiệu lực từ 2026-08-29, siết 2026-09-02)
 
 > **Mỗi lần chỉnh sửa code (bất kỳ file nào trong `check_rule_pan/`, `check_ip_pan/`, `check_audit_pan/`
-> hoặc `tools/`), bắt buộc phải đồng thời cập nhật `PaloPANORAMA_single.md` trong cùng commit:**
+> hoặc `tools/`), bắt buộc phải đồng thời cập nhật `PaloPANORAMA_single.md` VÀ sinh trực tiếp ra `PaloPANORAMA_single.py` trong cùng commit:**
 
 1. **Cập nhật PHẦN XIV** — thêm 1 dòng changelog mới ở đầu danh sách (giữ nguyên các dòng cũ), ghi rõ:
    ` [YYYY-MM-DD] Tên thay đổi — file đã sửa — lý do/nghiệp vụ — người thực hiện (nếu có)`.
 2. **Cập nhật đúng Phần nghiệp vụ tương ứng** (0 / II / III / IV) nếu luật/thứ tự/API thay đổi — không chỉ ghi ở XIV.
-3. **Rebuild file single** — chạy `python tools/build_panorama_single.py` và `python -m py_compile PaloPANORAMA_single.py` để đảm bảo single-file đồng bộ với source rời.
-4. **Không tách commit** "code riêng, doc riêng" — 1 thay đổi = 1 commit chứa cả code + md + single (nếu có). Reviewer từ chối PR nếu thiếu bước 1-3.
-5. **Automation gợi ý**: pre-commit hook `tools/check_md_sync.py` (nếu có) sẽ so sánh `git diff --name-only` có chứa `*.py` nhưng không chứa `PaloPANORAMA_single.md` → cảnh báo fail; chạy `python tools/build_panorama_single.py --check-md` để verify.
+3. **Sinh trực tiếp Single-File (bắt buộc từ 2026-09-02)** — ngay sau sửa, chạy:
+   `python tools/build_panorama_single.py && python -m py_compile PaloPANORAMA_single.py`
+   để đảm bảo `PaloPANORAMA_single.py` luôn là bản mới nhất của 3 package `*_pan` (zip+base64, đã kiểm chứng không lệch). **Không được để source rời mới hơn single** — CI/review sẽ so sánh timestamp/hash; lệch là fail. Từ nay, mọi PR/commit có đụng `check_*_pan/*.py` mà thiếu `PaloPANORAMA_single.py` trong cùng diff sẽ bị từ chối tự động.
+4. **Không tách commit** "code riêng, doc riêng, single riêng" — 1 thay đổi = 1 commit chứa cả code + md + single. Reviewer từ chối PR nếu thiếu bước 1–3.
+5. **Automation (bắt buộc):** pre-commit hook `tools/check_md_sync.py` + `tools/check_single_sync.py` sẽ kiểm tra:
+   - `git diff --name-only` có `*.py` nhưng không có `PaloPANORAMA_single.md` → fail
+   - `git diff --name-only` có `check_*_pan/*.py` nhưng `PaloPANORAMA_single.py` không đổi hoặc `py_compile` fail → fail
+   - Chạy `python tools/build_panorama_single.py --check` để verify hash single khớp source.
 
 *Vi phạm quy tắc này được coi là thiếu bàn giao — phải bổ sung ngay trước khi merge/release.*
 
@@ -539,7 +642,11 @@ Device Group, target)? → đọc lại PHẦN 0 trước khi sửa, đảm bả
 # PHẦN XIV — NHẬT KÝ THAY ĐỔI GẦN NHẤT
 
 > Chỉ liệt kê ngắn gọn. Chi tiết luật nghiệp vụ đã có sẵn ở Phần 0/II/III/IV — không lặp lại.
-> **Quy tắc V.4**: mỗi dòng dưới đây tương ứng 1 commit đồng bộ code + md + single.
+> **Quy tắc V.4**: mỗi dòng dưới đây tương ứng 1 commit đồng bộ code + md + single (từ 2026-09-02, single luôn sinh trực tiếp).
+
+- **[2026-09-02] Vá audit PaloPANORAMA_single.py (check_audit) — sửa 2 lỗi nghiêm trọng + 3 vấn đề nhỏ — file đã sửa: detectors.py, pan_api.py, gui.py, PaloPANORAMA_single.md — lý do: audit giải nén single phát hiện UNREACHABLE còn sót D9 + hit-count sai cú pháp.** Chi tiết audit: (1) **UNREACHABLE D9 còn sót:** `_find_unreachable_rules()` khoá `shadow` theo tên thuần `r2.name`, nay sửa khoá `(r2.name, r2.vi_tri)` đồng bộ với UNUSED, mọi tra cứu `unreachable_map` đổi sang `(name, vi_tri)` + fallback tên thuần cho test cũ. Nếu không, 2 rule cùng tên ở 2 DG khác nhau ghi đè nhau, gán sai `shadowed_by` hoặc mất Finding. (2) **Hit-count sai cú pháp:** cmd cũ chứa `<device-group-name>/<serial>/<rule-base>` generic + wildcard, PAN-OS trả lỗi cú pháp → UNUSED luôn rỗng. Sửa thành 2 lệnh đúng `<pre-rulebase>` + `<post-rulebase>` với wildcard (`target=<serial>` quyết firewall), chi phí hit-count từ 1→2 call, tổng batch từ 5→6 call (4 rule-states +2 hit). Ghi chú lab: nếu wildcard op không hỗ trợ, cần loop theo DG cụ thể. (3) **Nhỏ:** xoá dead code `if not result or all(...): pass` trong `fetch_current_rule_states`, đổi so sánh S/D/S từ `list` sang `set` tránh sai do thứ tự `<member>`, nới chặn cứng “trùng tên ở bất kỳ DG nào cũng chặn” trong `_on_import` — nay chỉ log cảnh báo nhưng vẫn xử lý chính xác theo `vi_tri` (D9 đã sửa). Không đổi D6 no-commit, format 15 cột, xpath.
+
+- **[2026-09-02] Thêm xác minh batch trước Disable/Delete + sửa lỗ hổng fetch_rule_hit_count khoá theo tên rule thuần (vi phạm D9 khi trùng tên khác DG) — file đã sửa: pan_api.py, gui.py — lý do: giảm rủi ro thao tác trên config đã đổi giữa lúc Check và lúc thực thi, chi phí cố định 4-5 API call/batch (sau vá audit 6 call) không phụ thuộc số rule.** Chi tiết: (1) Sửa `fetch_rule_hit_count()` (cả `PanApiClient` và wrapper) trả `Dict[Tuple[str,str], RuleHitStat]` khoá `(rule_name, vi_tri)` thay vì tên thuần; rà soát `gui._delete_worker` cập nhật tra cứu. (2) Thêm `fetch_current_rule_states()` 4 lệnh `action=get` wildcard cố định (Shared-PRE/POST + DG-PRE/POST) parse giữ DG cha, dựng `vi_tri`, trả `Dict[(rule_name,vi_tri)->{disabled,source,destination,service,action}]`. (3) Sửa `_delete_worker(candidates, mgmt_ip, api_key, verify_ssl, target_serial)` thêm `target_serial`, batch xác minh `fresh_hit_stats` (nếu có target, nay 2 call) + `fresh_states`, lọc tại chỗ 5 điều kiện R3, báo cáo R4 tách `Disable OK / Delete OK / Bị loại khi xác minh lại / Bỏ qua đã mong muốn / Lỗi API`. Không đổi detector/format 15 cột/xpath (UNREACHABLE sau đó được vá ở dòng trên), D6 no-commit, dùng Candidate Config `action=get` cho xác minh (ngoại lệ 0.4). (4) Tài liệu: thêm **IV.8**, cập nhật **IV.6**, siết **V.4** sinh trực tiếp `PaloPANORAMA_single.py`.
 
 - **[2026-08-29] CHECK AUDIT — Phân biệt Import theo loại + Quy tắc đồng bộ .md (V.4).**
   (1) `check_audit_pan`: Shadow Rules có `hit_count==0` (UNUSED 0 hits) khi Import **chỉ cho phép Disable**

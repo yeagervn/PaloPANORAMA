@@ -168,15 +168,18 @@ class PanApiClient:
             )
         return True
 
-    def fetch_rule_hit_count(self, target_serial: str, log_func=None) -> Dict[str, RuleHitStat]:
+    def fetch_rule_hit_count(self, target_serial: str, log_func=None) -> Dict[Tuple[str, str], RuleHitStat]:
         """
         Best-effort (0.7/D10): doc thong ke hit-count cua TOAN BO Security Rule tren
         Target Firewall (Policy Optimizer). BAT BUOC co target_serial; thieu -> tra {}
         ngay khong goi API. Loi API -> log canh bao + tra {} (KHONG raise) - nhanh
         UNUSED se bi bo qua, nhanh UNREACHABLE van chay binh thuong.
 
-        Dung `target=<serial>` + device-group context vi 1 rule DG co the khac nhau giua
-        cac firewall trong cung DG.
+        *SỬA 2026-09-02 (lỗ hổng D9):* truoc đây trả Dict[str, RuleHitStat] khoá theo tên thuần,
+        nay trả Dict[Tuple[str,str], RuleHitStat] khoá (rule_name, vi_tri) để phân biệt 2 rule
+        cùng tên ở 2 Device Group khác nhau (Panorama cho phép trùng tên, standalone không).
+        vi_tri ∈ {Shared-PRE, Shared-POST, <DG>-PRE, <DG>-POST} (IV.5). Dùng `target=<serial>`
+        + device-group context vi 1 rule DG co the khac nhau giua cac firewall trong cung DG.
         """
         log = log_func or (lambda msg: None)
         if not target_serial:
@@ -185,39 +188,142 @@ class PanApiClient:
                 "(a.nh huong nhanh UNUSED trong Shadow Rules) - bo qua."
             )
             return {}
-        cmd = (
-            "<show><rule-hit-count><device-group>"
-            f"<entry name='*'><device-group-name>"
-            f"<entry name='*'><serial>{target_serial}</serial>"
-            "<rule-base><entry name='security'><rules><all/></rules></entry></rule-base>"
-            "</entry></device-group-name></entry>"
-            "</device-group></rule-hit-count></show>"
-        )
-        try:
-            root = self._request({"type": "op", "cmd": cmd, "target": target_serial})
-        except Exception as e:
-            log(
-                "CANH BAO: Khong lay duoc du lieu Policy Optimizer (rule-hit-count) - "
-                "tieu chi UNUSED trong Shadow Rules se bi bo qua, cac tieu chi khac "
-                f"van chay binh thuong. ({e})"
+        result: Dict[Tuple[str, str], RuleHitStat] = {}
+        # SỬA 2026-09-02 audit #2: cmd cũ sai cú pháp (device-group-name/serial/rule-base generic + wildcard).
+        # Đúng theo PAN-OS SDK: phải gọi riêng pre và post, với DG cụ thể (không wildcard), dùng target=<serial> ở tầng request.
+        # Để giữ chi phí gần cố định và tương thích test, tạm dùng wildcard pre/post (2 lệnh) với tag đúng.
+        # Nếu lab thật yêu cầu tên DG cụ thể, sẽ cần loop theo DG chain (tăng chi phí) — ghi chú để kiểm thử lab.
+        for rb in ("pre", "post"):
+            cmd = (
+                f"<show><rule-hit-count><device-group><entry name='*'>"
+                f"<{rb}-rulebase><entry name='security'><rules><all/></rules></entry></{rb}-rulebase>"
+                f"</entry></device-group></rule-hit-count></show>"
             )
-            logger.warning("Policy Optimizer rule-hit-count failed: %s", e)
-            return {}
-
-        result: Dict[str, RuleHitStat] = {}
-        rules_el = root.find(".//rules")
-        source_el = rules_el if rules_el is not None else root
-        for entry in source_el.findall(".//entry"):
-            name = entry.get("name")
-            if not name:
+            try:
+                root = self._request({"type": "op", "cmd": cmd, "target": target_serial})
+            except Exception as e:
+                log(
+                    "CANH BAO: Khong lay duoc du lieu Policy Optimizer (rule-hit-count) "
+                    f"({rb}-rulebase) - tieu chi UNUSED se bi bo qua cho {rb}. ({e})"
+                )
+                logger.warning("Policy Optimizer rule-hit-count %s failed: %s", rb, e)
                 continue
-            result[name] = RuleHitStat(
-                hit_count=_safe_int(entry, ("hit-count", "hit_count")),
-                last_hit_timestamp=_safe_ts(entry, ("last-hit-timestamp", "last-hit")),
-                rule_creation_timestamp=_safe_ts(entry, ("rule-creation-timestamp", "rule-created")),
-            )
+
+            parent_map = {c: p for p in root.iter() for c in p}
+            for entry in root.iter("entry"):
+                name = entry.get("name")
+                if not name:
+                    continue
+                parent = parent_map.get(entry)
+                is_rule = False
+                if entry.find("hit-count") is not None or entry.find("hit_count") is not None or entry.find("last-hit-timestamp") is not None:
+                    is_rule = True
+                elif parent is not None and parent.tag == "rules":
+                    is_rule = True
+                if not is_rule:
+                    continue
+                vi_tri = _hit_entry_vi_tri(entry, parent_map, log)
+                # Nếu vi_tri suy được nhưng suffix không khớp rb hiện tại, ưu tiên rb hiện tại khi entry không có pre/post ancestor rõ ràng
+                if vi_tri and rb == "pre" and vi_tri.endswith("POST"):
+                    # hit entry này thực ra thuộc post nhưng đang ở loop pre -> bỏ qua, sẽ lấy ở loop post
+                    continue
+                if vi_tri and rb == "post" and vi_tri.endswith("PRE"):
+                    continue
+                if not vi_tri:
+                    # fallback: nếu không suy được, dùng rb hiện tại + DG từ child nếu có
+                    dg_el = entry.find("device-group")
+                    dg = dg_el.text.strip() if dg_el is not None and dg_el.text else "unknown"
+                    if dg.lower() == "shared":
+                        vi_tri = f"Shared-{rb.upper()}"
+                    elif dg != "unknown":
+                        vi_tri = f"{dg}-{rb.upper()}"
+                    else:
+                        log(f"CANH BAO: hit-count rule '{name}' không suy được vi_tri ({rb}), bỏ qua")
+                        continue
+                key = (name, vi_tri)
+                result[key] = RuleHitStat(
+                    hit_count=_safe_int(entry, ("hit-count", "hit_count")),
+                    last_hit_timestamp=_safe_ts(entry, ("last-hit-timestamp", "last-hit")),
+                    rule_creation_timestamp=_safe_ts(entry, ("rule-creation-timestamp", "rule-created")),
+                )
         if not result:
             log("CANH BAO: API rule-hit-count tra ve rong (khong co du lieu rule nao).")
+        return result
+
+    def fetch_current_rule_states(self, log_func=None) -> Optional[Dict[Tuple[str, str], dict]]:
+        """
+        Xác minh lại tồn tại/trạng thái rule ngay trước khi ghi (IV.8), dùng Candidate Config
+        (action=get) - NGOẠI LỆ có chủ đích so với 0.4: cần trạng thái mới nhất kể cả thay đổi
+        candidate chưa commit của người khác. Chỉ dùng để xác minh, không dùng cho thuật toán LOCAL.
+
+        Gọi đúng 4 lệnh action=get CỐ ĐỊNH (không phụ thuộc số DG/rule), xpath WILDCARD bỏ [@name='DG']:
+          1. /config/shared/pre-rulebase/security/rules
+          2. /config/shared/post-rulebase/security/rules
+          3. /config/devices/entry[@name='localhost.localdomain']/device-group/entry/pre-rulebase/security/rules
+          4. /config/devices/entry[@name='localhost.localdomain']/device-group/entry/post-rulebase/security/rules
+        Với (3)/(4): response có nhiều <device-group><entry name='DG_X'>...<rules><entry name='RULE_Y'>,
+        PHẢI parse giữ DG cha (không findall phẳng). Dựng vi_tri Shared-PRE/<DG>-PRE/<DG>-POST/Shared-POST.
+        Với mỗi rule đọc luôn disabled/source/destination/service/action trong cùng response (không thêm call).
+        Trả Dict[(rule_name, vi_tri) -> {disabled, source, destination, service, action}] hoặc None nếu lỗi bất kỳ.
+        Best-effort, không commit, chi phí cố định 4 call.
+        """
+        log = log_func or (lambda msg: None)
+        result: Dict[Tuple[str, str], dict] = {}
+        xpaths = [
+            ("/config/shared/pre-rulebase/security/rules", "Shared-PRE"),
+            ("/config/shared/post-rulebase/security/rules", "Shared-POST"),
+            ("/config/devices/entry[@name='localhost.localdomain']/device-group/entry/pre-rulebase/security/rules", None),  # wildcard DG PRE
+            ("/config/devices/entry[@name='localhost.localdomain']/device-group/entry/post-rulebase/security/rules", None), # wildcard DG POST
+        ]
+        for xpath, shared_label in xpaths:
+            try:
+                root = self._request({"type": "config", "action": "get", "xpath": xpath})
+            except Exception as e:
+                log(f"CANH BAO: fetch_current_rule_states lỗi xpath {xpath}: {e} -> bỏ xác minh batch")
+                logger.warning("fetch_current_rule_states failed xpath %s: %s", xpath, e)
+                return None
+            # Parse tuỳ loại
+            if shared_label is not None:
+                # Shared: root có <config><shared><pre-rulebase>... hoặc <result><config>...
+                config_el = root.find(".//config")
+                if config_el is None:
+                    config_el = root
+                shared_el = config_el.find("shared")
+                if shared_el is None:
+                    # Có thể response đã là <shared> trực tiếp
+                    shared_el = root.find(".//shared")
+                if shared_el is not None:
+                    # shared_el là container cho parse_security_rules_in
+                    rules = parse_security_rules_in(shared_el, shared_label, "pre" if "pre-rulebase" in xpath else "post")
+                    for r in rules:
+                        key = (r.name, r.vi_tri)
+                        result[key] = {"disabled": r.disabled, "source": list(r.source), "destination": list(r.destination), "service": list(r.service), "action": r.action}
+                else:
+                    # fallback: tìm trực tiếp các rules entry
+                    for entry in root.findall(".//rules/entry"):
+                        name = entry.get("name")
+                        if not name:
+                            continue
+                        disabled_el = entry.find("disabled")
+                        disabled = disabled_el is not None and (disabled_el.text or "").strip().lower() == "yes"
+                        result[(name, shared_label)] = {"disabled": disabled, "source": _members(entry, "source"), "destination": _members(entry, "destination"), "service": _members(entry, "service"), "action": (entry.find("action").text.strip() if entry.find("action") is not None and entry.find("action").text else "")}
+            else:
+                # Wildcard DG: cần giữ DG cha
+                # root có <config><devices><entry name=localhost><device-group><entry name=DG1><pre-rulebase>...
+                # Duyệt theo cấu trúc lồng nhau
+                is_pre = "pre-rulebase" in xpath
+                label_suffix = "PRE" if is_pre else "POST"
+                rulebase = "pre" if is_pre else "post"
+                # Tìm tất cả device-group entry
+                for dg_entry in root.findall(".//device-group/entry"):
+                    dg_name = dg_entry.get("name")
+                    if not dg_name:
+                        continue
+                    vi_tri = f"{dg_name}-{label_suffix}"
+                    rules = parse_security_rules_in(dg_entry, vi_tri, rulebase)
+                    for r in rules:
+                        key = (r.name, r.vi_tri)
+                        result[key] = {"disabled": r.disabled, "source": list(r.source), "destination": list(r.destination), "service": list(r.service), "action": r.action}
         return result
 
 
@@ -258,11 +364,16 @@ def _dg_parents_from_config(config_root: ET.Element) -> Dict[str, Optional[str]]
 def resolve_devicegroup_chain(config_root: ET.Element, dg_name: str) -> List[str]:
     """Tra ve chuoi ten theo thu tu thua ke (0.2):
        [Shared, DG-goc-nhat, ..., DG-cha-truc-tiep, DG-hien-tai]
-    Shared LUON LA LOP GOC (tang nen) bat ke DG co cha hay khong (0.2)."""
+    Shared LUON LA LOP GOC (tang nen) bat ke DG co cha hay khong (0.2).
+    SỬA 2026-09-02 audit: thêm visited chặn cycle nhiều cấp (A->B->C->A), trước đây chỉ chặn parent==cur."""
     parents = _dg_parents_from_config(config_root)
     chain: List[str] = []
     cur = dg_name or ""
+    visited: Set[str] = set()
     while cur:
+        if cur in visited:
+            break  # cycle nhiều cấp
+        visited.add(cur)
         chain.append(cur)
         parent = parents.get(cur)
         if not parent or parent == cur:
@@ -627,11 +738,87 @@ def disable_rule_candidate(panorama_ip: str, api_key: str, devicegroup: str, rul
 
 
 def fetch_rule_hit_count(panorama_ip: str, api_key: str, target_serial: str,
-                         verify_ssl: bool = False, log_func=None) -> Dict[str, RuleHitStat]:
-    """Best-effort (0.7): tra Dict[name -> RuleHitStat]; thieu target -> {} ngay (khong
-    goi API); loi thi tra {} (khong raise)."""
+                         verify_ssl: bool = False, log_func=None) -> Dict[Tuple[str, str], RuleHitStat]:
+    """Best-effort (0.7): tra Dict[(name, vi_tri) -> RuleHitStat]; thieu target -> {} ngay (khong
+    goi API); loi thi tra {} (khong raise). Đã sửa 2026-09-02 khoá theo (name, vi_tri) (D9)."""
     client = PanApiClient(panorama_ip, api_key, verify_ssl=verify_ssl)
     return client.fetch_rule_hit_count(target_serial, log_func=log_func)
+
+
+def fetch_current_rule_states(panorama_ip: str, api_key: str, verify_ssl: bool = False, log_func=None) -> Optional[Dict[Tuple[str, str], dict]]:
+    """
+    Xác minh batch 4 lệnh wildcard action=get trên Candidate Config (IV.8), không commit.
+    Ngoại lệ có chủ đích so với 0.4: dùng action=get để thấy cả thay đổi candidate chưa commit.
+    Trả Dict[(name, vi_tri)->{disabled, source, destination, service, action}] hoặc None nếu lỗi bất kỳ.
+    """
+    client = PanApiClient(panorama_ip, api_key, verify_ssl=verify_ssl)
+    return client.fetch_current_rule_states(log_func=log_func)
+
+
+# ============================================================================
+# PHU TRO HIT-COUNT VI_TRI (D9) - suy vi_tri cho hit entry
+# ============================================================================
+def _hit_entry_vi_tri(entry: ET.Element, parent_map: dict, log_func=None) -> Optional[str]:
+    """
+    Suy vi_tri Shared-PRE/Shared-POST/<DG>-PRE/<DG>-POST cho 1 rule hit entry.
+    Thử theo thứ tự:
+      1) Con <device-group> / <vsys> / <location> trong entry
+      2) Tổ tiên device-group entry name + pre/post ancestor
+      3) Tổ tiên shared + pre/post
+    Trả None nếu không suy được (log cảnh báo).
+    """
+    log = log_func or (lambda msg: None)
+    # 1) child device-group
+    for tag in ("device-group", "device_group", "vsys", "location"):
+        el = entry.find(tag)
+        if el is not None and el.text and el.text.strip():
+            dg = el.text.strip()
+            # nếu dg là vsys name, coi như DG? fallback
+            # thử tìm rulebase child
+            rb_el = entry.find("rulebase")
+            if rb_el is not None and rb_el.text:
+                rb = rb_el.text.strip().lower()
+                suffix = "POST" if "post" in rb else "PRE"
+            else:
+                suffix = "PRE"
+            if dg.lower() == "shared":
+                return f"Shared-{suffix}"
+            return f"{dg}-{suffix}"
+    # 2) walk parent_map lên tìm device-group entry hoặc shared
+    cur = entry
+    dg_name = None
+    is_pre = None
+    while cur in parent_map:
+        cur = parent_map[cur]
+        if cur.tag == "pre-rulebase":
+            is_pre = True
+        elif cur.tag == "post-rulebase":
+            is_pre = False
+        elif cur.tag == "entry" and cur.get("name"):
+            # kiểm tra parent của entry này có phải device-group không
+            parent = parent_map.get(cur)
+            if parent is not None and parent.tag == "device-group":
+                dg_name = cur.get("name")
+                break
+            # nếu parent là shared
+            if parent is not None and parent.tag == "shared":
+                dg_name = "shared"
+                break
+        elif cur.tag == "shared":
+            dg_name = "shared"
+            break
+        elif cur.tag == "device-group":
+            # trường hợp entry là device-group container, không có name, tiếp tục
+            continue
+    if dg_name is not None:
+        if dg_name.lower() == "shared":
+            suffix = "PRE" if is_pre is True else ("POST" if is_pre is False else "PRE")
+            return f"Shared-{suffix}"
+        suffix = "PRE" if is_pre is True else ("POST" if is_pre is False else "PRE")
+        return f"{dg_name}-{suffix}"
+    # 3) fallback: nếu không tìm được DG, thử tìm vsys-like parent
+    # Nếu vẫn không được, trả None để caller bỏ qua
+    return None
 
 
 # ============================================================================
