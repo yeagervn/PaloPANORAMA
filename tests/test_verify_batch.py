@@ -267,7 +267,8 @@ class TestVerifyBatch(TestCase):
                 filtered = True
             self.assertFalse(filtered)
 
-    # 8. Count verification calls fixed 6 with target (4 states +2 hit pre/post), 4 without, independent of N (sau vá audit hit-count 1->2)
+    # 8. Count verification calls fixed 8 with target (4 states + 4 hit: DG pre/post +
+    #    Shared pre/post), 4 without -- DOC LAP voi so rule N (day moi la diem can giu).
     def test_08_fixed_cost(self):
         for with_target in [True, False]:
             client = FakeBatchClient()
@@ -280,13 +281,13 @@ class TestVerifyBatch(TestCase):
             client.set_hit(hit_dict if with_target else {})
             with patch.object(PanApiClient, '_request', side_effect=client._request):
                 client.calls = []
-                # simulate batch verification: 2 hit (pre+post) + 4 states
+                # simulate batch verification: 4 hit (DG pre/post + Shared pre/post) + 4 states
                 if with_target:
                     _ = client.fetch_rule_hit_count("SERIAL")
                 _ = client.fetch_current_rule_states()
                 # count only verification calls: type config get + op hit
                 verify_calls = [c for c in client.calls if c.get("action")=="get" or "rule-hit-count" in c.get("cmd","")]
-                expected = 6 if with_target else 4
+                expected = 8 if with_target else 4
                 self.assertEqual(len(verify_calls), expected, f"with_target={with_target} expected {expected} got {len(verify_calls)}")
 
     # 9. No commit in entire flow
@@ -323,6 +324,10 @@ class TestVerifyBatch(TestCase):
     def test_11_worker_integration_batch_filtering(self):
         """Integration: gọi trực tiếp App._delete_worker với Fake API, kiểm tra R3 filtering + R4 báo cáo"""
         import queue, threading
+        try:
+            import tkinter  # noqa: F401  (check_audit_pan.gui import tkinter o module level)
+        except ImportError:
+            self.skipTest("moi truong khong co tkinter - khong import duoc GUI module")
         from check_audit_pan.gui import App
         # Tạo mock app không cần Tk
         mock = App.__new__(App)

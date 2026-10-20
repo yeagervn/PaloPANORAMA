@@ -2,3 +2,12 @@ build/
 dist/
 __pycache__/
 *.pyc
+
+# testlab - san pham sinh ra khi chay thu, khong commit
+testlab/output/
+testlab/.certs/
+testlab/.journal.log
+
+# san pham sinh ra khi chay test, khong commit (ten co timestamp -> nhieu rac)
+tests/output_for_review/
+tests/test_full_flow_result.txt

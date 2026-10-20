@@ -190,24 +190,46 @@ class PanApiClient:
             return {}
         result: Dict[Tuple[str, str], RuleHitStat] = {}
         # SỬA 2026-09-02 audit #2: cmd cũ sai cú pháp (device-group-name/serial/rule-base generic + wildcard).
-        # Đúng theo PAN-OS SDK: phải gọi riêng pre và post, với DG cụ thể (không wildcard), dùng target=<serial> ở tầng request.
-        # Để giữ chi phí gần cố định và tương thích test, tạm dùng wildcard pre/post (2 lệnh) với tag đúng.
-        # Nếu lab thật yêu cầu tên DG cụ thể, sẽ cần loop theo DG chain (tăng chi phí) — ghi chú để kiểm thử lab.
-        for rb in ("pre", "post"):
-            cmd = (
-                f"<show><rule-hit-count><device-group><entry name='*'>"
-                f"<{rb}-rulebase><entry name='security'><rules><all/></rules></entry></{rb}-rulebase>"
-                f"</entry></device-group></rule-hit-count></show>"
-            )
+        # Đúng theo PAN-OS SDK: phải gọi riêng pre và post, dùng target=<serial> ở tầng request.
+        # Chi phí CO DINH 4 lenh (khong phu thuoc so DG/so rule):
+        #   device-group wildcard pre/post  +  shared pre/post
+        # LUU Y (da kiem thu trong testlab): nhanh <shared> la BEST-EFFORT. Tren Panorama
+        # that, neu schema khong ho tro node <shared> cho rule-hit-count thi lenh nay bi
+        # tu choi -> da boc try/except: chi log canh bao va di tiep, KHONG raise, cac rule
+        # trong Device Group van co hit-count binh thuong. Khong co nhanh nay thi rule
+        # Shared-PRE/Shared-POST vinh vien khong bao gio co hit-count => tieu chi UNUSED
+        # khong bao gio ap dung cho rule Shared (bo sot). Da chon danh doi 2 call de tranh.
+        scopes = [
+            ("device-group wildcard", "pre",
+             "<show><rule-hit-count><device-group><entry name='*'>"
+             "<pre-rulebase><entry name='security'><rules><all/></rules></entry></pre-rulebase>"
+             "</entry></device-group></rule-hit-count></show>"),
+            ("device-group wildcard", "post",
+             "<show><rule-hit-count><device-group><entry name='*'>"
+             "<post-rulebase><entry name='security'><rules><all/></rules></entry></post-rulebase>"
+             "</entry></device-group></rule-hit-count></show>"),
+            ("shared", "pre",
+             "<show><rule-hit-count><shared>"
+             "<pre-rulebase><entry name='security'><rules><all/></rules></entry></pre-rulebase>"
+             "</shared></rule-hit-count></show>"),
+            ("shared", "post",
+             "<show><rule-hit-count><shared>"
+             "<post-rulebase><entry name='security'><rules><all/></rules></entry></post-rulebase>"
+             "</shared></rule-hit-count></show>"),
+        ]
+        for scope_label, rb, cmd in scopes:
             try:
                 root = self._request({"type": "op", "cmd": cmd, "target": target_serial})
             except Exception as e:
                 log(
                     "CANH BAO: Khong lay duoc du lieu Policy Optimizer (rule-hit-count) "
-                    f"({rb}-rulebase) - tieu chi UNUSED se bi bo qua cho {rb}. ({e})"
+                    f"[{scope_label} / {rb}-rulebase] - tieu chi UNUSED se bi bo qua cho "
+                    f"pham vi nay. ({e})"
                 )
-                logger.warning("Policy Optimizer rule-hit-count %s failed: %s", rb, e)
+                logger.warning("Policy Optimizer rule-hit-count %s/%s failed: %s",
+                               scope_label, rb, e)
                 continue
+            default_dg = "shared" if scope_label == "shared" else None
 
             parent_map = {c: p for p in root.iter() for c in p}
             for entry in root.iter("entry"):
@@ -232,7 +254,8 @@ class PanApiClient:
                 if not vi_tri:
                     # fallback: nếu không suy được, dùng rb hiện tại + DG từ child nếu có
                     dg_el = entry.find("device-group")
-                    dg = dg_el.text.strip() if dg_el is not None and dg_el.text else "unknown"
+                    dg = (dg_el.text.strip() if dg_el is not None and dg_el.text
+                          else (default_dg or "unknown"))
                     if dg.lower() == "shared":
                         vi_tri = f"Shared-{rb.upper()}"
                     elif dg != "unknown":

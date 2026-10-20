@@ -1,0 +1,229 @@
+<config>
+  <!-- ===================================================================
+       CANDIDATE CONFIG = running + thay doi CHUA commit cho testlab.
+       Phu: Shared + 3 tang Device Group (DG-ALL > DG-DC > DG-HN),
+       pre/post-rulebase o ca Shared lan tung DG, Template + Template Stack
+       gan serial, va <readonly> chua quan he parent-dg (dung nhu that).
+       Xem testlab/README.md de biet dong input nao ra tier nao.
+       =================================================================== -->
+  <shared>
+    <address>
+      <entry name="SHARED-DNS"><ip-netmask>8.8.8.8/32</ip-netmask></entry>
+      <entry name="OVERRIDE-ME"><ip-netmask>10.255.255.255/32</ip-netmask></entry>
+      <entry name="WEB-FARM"><ip-netmask>192.168.50.80/32</ip-netmask></entry>
+    </address>
+    <service>
+      <entry name="SVC-HTTPS"><protocol><tcp><port>443</port></tcp></protocol></entry>
+      <entry name="SVC-8080"><protocol><tcp><port>8080</port></tcp></protocol></entry>
+    </service>
+    <pre-rulebase><security><rules>
+      <!-- Shared-PRE: rule deny tren cung cua TOAN BO Panorama -> test SHADOW -->
+      <entry name="S00-BLOCK-BADNET">
+        <from><member>any</member></from><to><member>any</member></to>
+        <source><member>10.66.66.0/24</member></source><destination><member>any</member></destination>
+        <service><member>any</member></service><application><member>any</member></application>
+        <action>deny</action>
+      </entry>
+    </rules></security></pre-rulebase>
+    <post-rulebase><security><rules>
+      <entry name="S99-ANY-ANY-ANY">
+        <from><member>any</member></from><to><member>any</member></to>
+        <source><member>any</member></source><destination><member>any</member></destination>
+        <service><member>any</member></service><application><member>any</member></application>
+        <action>allow</action>
+      </entry>
+    </rules></security></post-rulebase>
+  </shared>
+  <devices><entry name="localhost.localdomain">
+    <device-group>
+
+      <entry name="DG-ALL">
+        <address>
+          <entry name="OVERRIDE-ME"><ip-netmask>10.1.1.1/32</ip-netmask></entry>
+          <entry name="NET-BIG"><ip-netmask>10.0.0.0/8</ip-netmask></entry>
+          <entry name="NET-DMZ"><ip-netmask>172.20.0.0/24</ip-netmask></entry>
+        </address>
+        <service>
+          <entry name="SVC-KAFKA"><protocol><tcp><port>9092-9096</port></tcp></protocol></entry>
+        </service>
+        <pre-rulebase><security><rules>
+          <entry name="A01-WIDE-SUBNET">
+            <from><member>any</member></from><to><member>any</member></to>
+            <source><member>NET-BIG</member></source><destination><member>NET-DMZ</member></destination>
+            <service><member>SVC-KAFKA</member></service><application><member>any</member></application>
+            <action>allow</action>
+          </entry>
+        </rules></security></pre-rulebase>
+        <post-rulebase><security><rules>
+          <entry name="A90-DGALL-POST-NOHIT">
+            <from><member>trust</member></from><to><member>untrust</member></to>
+            <source><member>10.44.44.44</member></source><destination><member>any</member></destination>
+            <service><member>any</member></service><application><member>any</member></application>
+            <action>allow</action>
+          </entry>
+        </rules></security></post-rulebase>
+      </entry>
+
+      <entry name="DG-DC">
+        <address>
+          <entry name="OVERRIDE-ME"><ip-netmask>10.2.2.2/32</ip-netmask></entry>
+          <entry name="HOST-DB-01"><ip-netmask>192.168.50.21/32</ip-netmask></entry>
+          <entry name="HOST-DB-02"><ip-netmask>192.168.50.22/32</ip-netmask></entry>
+          <entry name="RANGE-WORKER"><ip-range>10.10.10.100-10.10.10.110</ip-range></entry>
+          <entry name="RANGE-A"><ip-range>10.10.10.200-10.10.10.204</ip-range></entry>
+          <entry name="RANGE-B"><ip-range>10.10.10.205-10.10.10.210</ip-range></entry>
+        </address>
+        <address-group>
+          <entry name="GR-DB"><static><member>HOST-DB-01</member><member>HOST-DB-02</member></static></entry>
+        </address-group>
+        <service>
+          <entry name="SVC-SQL"><protocol><tcp><port>1433</port></tcp></protocol></entry>
+          <entry name="SVC-ORACLE"><protocol><tcp><port>1521</port></tcp></protocol></entry>
+          <entry name="SVC-SYSLOG"><protocol><udp><port>514</port></udp></protocol></entry>
+        </service>
+        <pre-rulebase><security><rules>
+          <entry name="D01-RANGE-TO-DB">
+            <from><member>trust</member></from><to><member>untrust</member></to>
+            <source><member>RANGE-WORKER</member></source><destination><member>HOST-DB-01</member></destination>
+            <service><member>SVC-ORACLE</member></service><application><member>any</member></application>
+            <action>allow</action>
+          </entry>
+          <entry name="D02-RANGE-UNION">
+            <from><member>trust</member></from><to><member>untrust</member></to>
+            <source><member>RANGE-A</member><member>RANGE-B</member></source>
+            <destination><member>HOST-DB-02</member></destination>
+            <service><member>SVC-ORACLE</member></service><application><member>any</member></application>
+            <action>allow</action>
+          </entry>
+          <entry name="D03-ZONE-GAP">
+            <from><member>trust</member></from><to><member>untrust</member></to>
+            <source><member>NET-DMZ</member></source><destination><member>HOST-DB-01</member></destination>
+            <service><member>SVC-SYSLOG</member></service><application><member>any</member></application>
+            <action>allow</action>
+          </entry>
+          <entry name="D03B-ZONE-ANY-OK">
+            <from><member>any</member></from><to><member>any</member></to>
+            <source><member>NET-DMZ</member></source><destination><member>HOST-DB-01</member></destination>
+            <service><member>SVC-SYSLOG</member></service><application><member>any</member></application>
+            <action>allow</action>
+          </entry>
+        </rules></security></pre-rulebase>
+        <post-rulebase><security><rules>
+          <entry name="D90-DISABLED-NOHIT">
+            <from><member>trust</member></from><to><member>untrust</member></to>
+            <source><member>HOST-DB-01</member></source><destination><member>HOST-DB-02</member></destination>
+            <service><member>SVC-8080</member></service><application><member>any</member></application>
+            <action>allow</action><disabled>yes</disabled>
+          </entry>
+        </rules></security></post-rulebase>
+      </entry>
+
+      <entry name="DG-HN">
+        <devices><entry name="001122334455"/><entry name="009988776655"/></devices>
+        <address>
+          <entry name="OVERRIDE-ME"><ip-netmask>10.3.3.3/32</ip-netmask></entry>
+          <entry name="HOST-APP-01"><ip-netmask>10.10.10.11/32</ip-netmask></entry>
+          <entry name="HOST-APP-02"><ip-netmask>10.10.10.12/32</ip-netmask></entry>
+          <entry name="HOST-APP-03"><ip-netmask>10.10.10.13/32</ip-netmask></entry>
+          <entry name="HOST-BADNET-50"><ip-netmask>10.66.66.50/32</ip-netmask></entry>
+          <entry name="HOST-ONLY-HN"><ip-netmask>10.10.10.99/32</ip-netmask></entry>
+          <entry name="FQDN-UPDATE"><fqdn>updates.example.com</fqdn></entry>
+          <!-- CANDIDATE ONLY: object vua tao, CHUA commit vao Panorama -->
+          <entry name="HOST-NEW-APP"><ip-netmask>10.10.10.77/32</ip-netmask></entry>
+        </address>
+        <address-group>
+          <entry name="GR-APP"><static>
+            <member>HOST-APP-01</member><member>HOST-APP-02</member><member>HOST-APP-03</member>
+          </static></entry>
+          <entry name="GR-DAG"><dynamic><filter>'tag-prod'</filter></dynamic></entry>
+        </address-group>
+        <pre-rulebase><security><rules>
+          <entry name="H01-APP-TO-DB">
+            <from><member>trust</member></from><to><member>untrust</member></to>
+            <source><member>GR-APP</member></source><destination><member>GR-DB</member></destination>
+            <service><member>SVC-SQL</member></service><application><member>any</member></application>
+            <action>allow</action>
+          </entry>
+          <entry name="H02-APP-TO-WEB">
+            <from><member>trust</member></from><to><member>untrust</member></to>
+            <source><member>GR-APP</member></source><destination><member>WEB-FARM</member></destination>
+            <service><member>SVC-HTTPS</member></service><application><member>any</member></application>
+            <action>allow</action>
+          </entry>
+          <!-- CANDIDATE ONLY: rule vua tao, CHUA commit (va du co commit vao
+               Panorama cung CHUA push xuong firewall - canh bao 2 tang commit) -->
+          <entry name="H99-CANDIDATE-NEW">
+            <from><member>trust</member></from><to><member>untrust</member></to>
+            <source><member>HOST-NEW-APP</member></source><destination><member>HOST-DB-01</member></destination>
+            <service><member>SVC-SQL</member></service><application><member>any</member></application>
+            <action>allow</action>
+          </entry>
+          <entry name="H03-ALLOW-BADNET-ANYWAY">
+            <from><member>any</member></from><to><member>any</member></to>
+            <source><member>HOST-BADNET-50</member></source><destination><member>HOST-DB-01</member></destination>
+            <service><member>SVC-SQL</member></service><application><member>any</member></application>
+            <action>allow</action>
+          </entry>
+        </rules></security>
+        <nat><rules>
+          <entry name="NAT01-OUTBOUND-HIDE">
+            <from><member>trust</member></from><to><member>untrust</member></to>
+            <source><member>GR-APP</member></source><destination><member>any</member></destination>
+            <service>any</service><nat-type>ipv4</nat-type>
+            <source-translation><dynamic-ip-and-port><interface-address>
+              <interface>ethernet1/2</interface><ip>192.168.50.1</ip>
+            </interface-address></dynamic-ip-and-port></source-translation>
+          </entry>
+        </rules></nat></pre-rulebase>
+        <post-rulebase><security><rules>
+          <entry name="H90-SHADOWED-NOHIT">
+            <from><member>trust</member></from><to><member>untrust</member></to>
+            <source><member>HOST-APP-02</member></source><destination><member>HOST-DB-02</member></destination>
+            <service><member>SVC-SQL</member></service><application><member>any</member></application>
+            <action>allow</action>
+          </entry>
+        </rules></security>
+        <nat><rules>
+          <entry name="NAT02-INBOUND-DNAT">
+            <from><member>untrust</member></from><to><member>trust</member></to>
+            <source><member>any</member></source><destination><member>WEB-FARM</member></destination>
+            <service>SVC-HTTPS</service><nat-type>ipv4</nat-type>
+            <destination-translation>
+              <translated-address>HOST-APP-01</translated-address><translated-port>8080</translated-port>
+            </destination-translation>
+          </entry>
+        </rules></nat></post-rulebase>
+      </entry>
+
+    </device-group>
+    <template>
+      <entry name="TPL-BASE">
+        <config><devices><entry name="localhost.localdomain">
+          <network><interface><ethernet>
+            <entry name="ethernet1/1"><layer3><ip><entry name="10.10.10.1/24"/></ip></layer3></entry>
+            <entry name="ethernet1/2"><layer3><ip><entry name="192.168.50.1/24"/></ip></layer3></entry>
+            <entry name="ethernet1/3"><layer3><ip><entry name="172.20.0.1/24"/></ip></layer3></entry>
+          </ethernet></interface></network>
+          <vsys><entry name="vsys1"><zone>
+            <entry name="trust"><network><layer3><member>ethernet1/1</member></layer3></network></entry>
+            <entry name="untrust"><network><layer3><member>ethernet1/2</member></layer3></network></entry>
+            <entry name="dmz"><network><layer3><member>ethernet1/3</member></layer3></network></entry>
+          </zone></entry></vsys>
+        </entry></devices></config>
+      </entry>
+    </template>
+    <template-stack>
+      <entry name="STACK-HN">
+        <templates><member>TPL-BASE</member></templates>
+        <devices><entry name="001122334455"/></devices>
+      </entry>
+    </template-stack>
+  </entry></devices>
+  <readonly><devices><entry name="localhost.localdomain">
+    <device-group>
+      <entry name="DG-ALL"/>
+      <entry name="DG-DC"><parent-dg>DG-ALL</parent-dg></entry>
+      <entry name="DG-HN"><parent-dg>DG-DC</parent-dg></entry>
+    </device-group>
+  </entry></devices></readonly>
+</config>
