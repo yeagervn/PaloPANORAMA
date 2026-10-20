@@ -13,6 +13,42 @@
 
 ---
 
+# TÌNH TRẠNG HIỆN TẠI (ảnh chụp bản mới nhất)
+
+> **Mục này PHẢI được cập nhật trong CÙNG lần bàn giao với mọi lần sửa code** (quy tắc V.4).
+> Ai tiếp nhận bảo trì đọc đúng mục này là biết ngay: bản hiện tại là gì, đã được kiểm chứng
+> tới đâu, và **cái gì CHƯA được kiểm chứng** — không phải đọc ngược toàn bộ changelog XIV.
+
+| | |
+|---|---|
+| **Cập nhật lúc** | 2026-10-20 |
+| **Repo / branch** | `yeagervn/PaloPANORAMA` — branch **`main`** (bản này được lấy làm main) |
+| **Commit HEAD** | `d2b3aa8` |
+| **Sản phẩm chính** | `PaloPANORAMA_single.py` (bản gộp 1 file, SHA256 `290f0125b1d14f05238ad29ea1d678862adc5b540fb3eaaf81ef3252e4cb4adb`, 250874 ký tự, nhúng 22 file py) |
+| **Sinh lại bản gộp** | `python tools/build_panorama_single.py` — kiểm tra lệch: `--check` (exit 1 nếu lệch), idempotent |
+| **Bộ test chung** | `python -m unittest discover -s tests -q` → **221 test, OK (skipped=1)** |
+| **Nghiệm thu trên Panorama giả lập** | `python testlab/run_all_features.py --auto` → **68/68 PASS** (xem PHẦN VI) |
+| **3 package** | `check_rule_pan/`, `check_ip_pan/`, `check_audit_pan/` — độc lập 100% về code/namespace/output/log |
+
+`skipped=1` là `tests/test_verify_batch.py::test_11` — test này import `check_audit_pan/gui.py`
+(module đó `import tkinter`); máy/CI **không có `python3-tk`** thì tự `skipTest`. Máy có thì chạy đủ.
+
+## Đã kiểm chứng tới đâu (và CHƯA tới đâu)
+
+| Hạng mục | Trạng thái | Bằng chứng |
+|---|---|---|
+| Luật nghiệp vụ 3 tool — **giữ nguyên 100%** so với bản Firewall standalone | **Đã kiểm chứng** | 221 test, trong đó port nguyên 9 bộ test nghiệp vụ của bản standalone + differential ngẫu nhiên |
+| 8 điểm đặc thù Panorama 0.1 → 0.8 (chuỗi DG, thừa kế object, lắp ráp 6 bước, candidate, Live Match/Zone/hit-count cần `target`, xpath ghi theo DG) | **Đã kiểm chứng** | `tests/test_panorama_infra.py` (36 test) + **68/68** ca nghiệm thu lab |
+| Lớp gọi API thật (HTTPS, op-command, parse phản hồi, lệnh ghi candidate) | **Đã kiểm chứng trên Panorama GIẢ LẬP** | `testlab/run_all_features.py --auto` |
+| Bản gộp 1 file | **Đã kiểm chứng** | build idempotent + SHA256 ở trên; giải nén zip nhúng, import lại 9 module logic từ bộ nhớ, xác nhận bản nhúng **không cũ hơn** source |
+| **GUI thật (vẽ widget, bấm nút)** | **CHƯA** | container không có `python3-tk`; 3 `gui.py` chỉ có `py_compile` + gọi trực tiếp hàm worker. `testlab/README.md` mục 2 ghi sẵn thông số (`127.0.0.1:8443`, DG `DG-HN`, target `001122334455`) |
+| **Chạy với Panorama THẬT** | **CHƯA** | cần 1 lần chạy **chỉ đọc** (không bấm Import) trên Panorama thật trước khi phát hành |
+| Schema `<shared>` của `show rule-hit-count` | **CHƯA xác nhận trên thiết bị thật** | để **best-effort có chủ đích**: Panorama từ chối → log cảnh báo + đi tiếp, rule trong DG vẫn đủ hit-count; kịch bản bị từ chối đã có 1 ca trong lab |
+| Rule **cục bộ trên firewall** (0.3 bước 3) | **Chưa có đường nạp** | hàm đọc + vị trí lắp ráp đã đúng, nhưng GUI chưa có ô nạp file config firewall → mặc định `local_rules=None` |
+| `security-policy-match`, `rule-hit-count` | **Mô phỏng** | lab duyệt theo đúng thứ tự lắp ráp 0.3; rất sát nhưng **không phải dataplane/Policy Optimizer thật** |
+
+---
+
 # PHẦN 0 — DELTA HẠ TẦNG: FIREWALL STANDALONE → PANORAMA
 
 **Đọc phần này TRƯỚC khi đọc bất kỳ phần nào khác.** Đây là danh sách đầy đủ mọi khác biệt hạ
@@ -157,12 +193,49 @@ nhánh UNREACHABLE (không phụ thuộc hit-count) **vẫn chạy bình thườ
 | **Tab "CHECK IP"** | Tool #2 — tra cứu **Security Rule + NAT Rule** (Shared + Device Group, cả pre lẫn post-rulebase) liên quan tới 1 danh sách IP cụ thể (EXACT-HOST ONLY); đối chiếu File Log; xuất Excel/CSV rich-text. |
 | **Tab "CHECK AUDIT"** | Tool #3 — audit "sức khỏe" toàn bộ rulebase của 1 Device Group (kể cả Shared + chuỗi DG cha áp xuống): **Shadow Rules**, **Disabled**, **Overly Permissive**; xoá rule trên **Candidate Config Panorama, không commit, không push**. |
 | **Nguyên tắc cốt lõi** | 3 tool **hoàn toàn độc lập về code, namespace, output, log** — giữ nguyên như bản gốc. |
-| **3 hình thái output mỗi lần bàn giao** | (1) File/package cấu phần đã sửa. (2) 1 file `.py` duy nhất (`PaloRuleSearchSuite_single.py`). (3) File `.md` này, cập nhật mục XIV. |
+| **3 hình thái output mỗi lần bàn giao** | (1) File/package cấu phần đã sửa. (2) 1 file `.py` duy nhất (`PaloPANORAMA_single.py`, sinh bởi `tools/build_panorama_single.py`). (3) File `.md` này: cập nhật mục **TÌNH TRẠNG HIỆN TẠI** + thêm entry **XIV**. (4) Mở rộng `testlab/` để chốt lại thay đổi. Chi tiết 7 bước bắt buộc: **V.4.1**. |
 
-## I.2–I.8
+## I.2. Cấu trúc thư mục (cập nhật 2026-10-20)
 
-**Toàn bộ kiến trúc ghép 3 tool (lý do không gộp phẳng, cấu trúc thư mục 2 package `check_rule/`
-+ `check_ip/` (+ `check_audit/` — Phần IV), quy tắc relative import, kỹ thuật đóng gói file
+```
+PaloPANORAMA/
+├── PaloPANORAMA_single.py       <-- SẢN PHẨM CHÍNH DUY NHẤT (bản gộp 1 file) — KHÔNG sửa tay
+├── PaloPANORAMA_single.md       <-- Tài liệu này (nguồn chân lý duy nhất)
+├── tools/build_panorama_single.py  <-- Sinh lại bản gộp; `--check` để phát hiện lệch (exit 1)
+│
+├── check_rule_pan/              <-- Tool #1 CHECK RULE (luật: Phần II; hạ tầng: PHẦN 0)
+│   ├── core.py                  # parse config Panorama, chuỗi DG, lắp ráp rulebase 6 bước, Template/Zone
+│   ├── resolver.py  index.py  request.py        # THUẦN nghiệp vụ — y nguyên bản standalone
+│   ├── matcher.py               # engine phân loại tier + Live Match (thêm target_serial)
+│   ├── exporter.py              # xuất Excel (thêm cột "Vi tri Rule" ở vị trí 2)
+│   └── gui.py                   # tab "CHECK RULE": Panorama IP + Device Group + Target Firewall
+│
+├── check_ip_pan/                <-- Tool #2 CHECK IP (luật: Phần III)
+│   ├── core.py  resolver_engine.py  matching_engine.py
+│   ├── pan_api.py               # đọc object/rule theo chuỗi DG + lắp ráp NAT theo pre/post-rulebase
+│   ├── excel_export.py          # Excel/CSV rich-text + bản gộp 1 file 2 sheet
+│   └── gui.py                   # tab "CHECK IP"
+│
+├── check_audit_pan/             <-- Tool #3 CHECK AUDIT (luật: Phần IV)
+│   ├── core.py  resolver.py  detectors.py  excel_io.py
+│   ├── pan_api.py               # hit-count (cần target) + lệnh ghi CANDIDATE theo xpath của DG
+│   └── gui.py                   # tab "CHECK AUDIT"
+│
+├── tests/                       <-- Bộ test chung: python -m unittest discover -s tests
+└── testlab/                     <-- MÔI TRƯỜNG CHẠY THỬ: Panorama giả lập (xem PHẦN VI)
+    ├── mock_panorama_api.py     # Panorama giả lập HTTPS; từ chối op-command thiếu `target`
+    ├── fixtures/*.xml           # running + candidate: 3 DG lồng nhau, Template/Stack, 13 rule + 2 NAT
+    ├── samples/                 # file input mẫu (Request .xlsx/.csv, danh sách IP, File Log)
+    ├── make_samples.py  run_all_features.py     # nghiệm thu 1 lệnh: --auto -> 68/68 PASS, exit 0/1
+    └── README.md                # hướng dẫn mở GUI thật trỏ vào Panorama giả lập
+```
+
+3 package đặt tên có hậu tố `_pan` và **bản gộp nhúng đúng TÊN THẬT** đó (không đổi thành
+`check_rule`) — nhờ vậy stack trace chỉ đúng module, và không lẫn với repo bản Firewall standalone.
+
+## I.3–I.8
+
+**Phần kiến trúc còn lại (lý do không gộp phẳng, quy tắc relative import, kỹ thuật đóng gói file
 single qua zip+base64+MetaPathFinder, cách chạy dev, output/log riêng từng tool, sơ đồ khởi động
 Tkinter Notebook) — **giữ nguyên 100% không đổi** so với bản Firewall standalone, vì đây là kiến
 trúc GUI/đóng gói Python, hoàn toàn độc lập với việc nguồn dữ liệu là Firewall hay Panorama.
@@ -616,6 +689,8 @@ Lỗi API: V rule.
 
 # PHẦN V — NGUYÊN TẮC BẢO TRÌ CHUNG
 
+> **Đọc V.4.1 trước khi commit bất cứ thay đổi nào** — đó là 7 bước bắt buộc của mỗi lần bảo trì.
+
 **Không đổi** so với bản gốc: quy tắc "chỉ sửa file cấu phần cần action" (bảng V.1), checklist
 bàn giao sau mỗi lần fix (V.2), checklist nhanh khi tiếp nhận bảo trì (V.3) — áp dụng nguyên văn,
 chỉ thêm 1 dòng vào checklist V.3: **"Sửa gì liên quan tới nguồn dữ liệu Panorama (xpath, chuỗi
@@ -641,12 +716,93 @@ Device Group, target)? → đọc lại PHẦN 0 trước khi sửa, đảm bả
 
 *Vi phạm quy tắc này được coi là thiếu bàn giao — phải bổ sung ngay trước khi merge/release.*
 
+### V.4.1 — 7 BƯỚC TIÊN QUYẾT CỦA MỖI LẦN BẢO TRÌ (siết từ 2026-10-20)
+
+> **Một lần bảo trì chỉ được coi là HOÀN THÀNH khi đủ 7 bước dưới đây, trong CÙNG 1 commit.**
+> Lý do siết: code mới + tài liệu cũ là tình huống **tệ hơn cả không có tài liệu**, vì người sau
+> tin vào tài liệu sai.
+
+| # | Bước | Cụ thể là gì |
+|---|---|---|
+| 1 | **Sửa đúng file cấu phần** | Theo bảng V.1 — không đụng package khác cho 1 yêu cầu đơn lẻ. Không bao giờ sửa tay `PaloPANORAMA_single.py`. Đụng nguồn dữ liệu Panorama (xpath, chuỗi DG, `target`) → đọc lại PHẦN 0 trước. |
+| 2 | **Cập nhật mục TÌNH TRẠNG HIỆN TẠI** (đầu tài liệu) | Sửa lại commit HEAD, SHA256 bản gộp, số test, số ca lab, và **bảng "đã kiểm chứng / CHƯA"** nếu hạng mục nào vừa đổi trạng thái (ví dụ vừa xác nhận được schema `<shared>` trên thiết bị thật). |
+| 3 | **Thêm 1 entry vào PHẦN XIV** | Theo đúng 5 phần: **lỗi/yêu cầu là gì → nguyên nhân gốc → đã sửa thế nào → cố tình KHÔNG đổi những gì → bằng chứng đo thật** (số test PASS, số ca lab, SHA build). Entry mới đặt **trên cùng**, không xoá/sửa entry cũ. |
+| 4 | **Sửa luôn mục luật tương ứng** | Luật hạ tầng đổi → sửa **PHẦN 0**; luật nghiệp vụ đổi → sửa **II/III/IV**. XIV là nhật ký, không phải luật hiện hành. |
+| 5 | **Mở rộng `testlab/`** | Mỗi luật mới / lỗi vừa sửa phải có **ít nhất 1 ca trong `testlab/run_all_features.py`** chốt lại nó (thêm rule/fixture nếu cần, theo quy ước VI.3), để lần sau không ai làm hồi quy. Thêm ca → cập nhật số PASS ở mục TÌNH TRẠNG và `testlab/README.md`. |
+| 6 | **Chạy thật, dán số thật** | `python -m unittest discover -s tests -q` **và** `python testlab/run_all_features.py --auto` phải xanh; dán **đúng con số đo được**. Không viết "đã test OK" suông, không nới lỏng assert, không skip test để xanh. |
+| 7 | **Sinh lại bản gộp** | `python tools/build_panorama_single.py && python tools/build_panorama_single.py --check`, ghi SHA256 mới vào mục TÌNH TRẠNG. Code rời mới hơn bản gộp = lỗi bàn giao. |
+
+**Bắt buộc nói rõ phần CHƯA làm.** Mỗi entry XIV phải có đoạn "CHƯA làm / hạn chế còn lại" — kể
+cả khi chỉ là nhắc lại "chưa chạy GUI thật / chưa chạy với Panorama thật". Kết luận "hoàn tất"
+mà không có số đo kèm theo là **không được chấp nhận**.
+
+---
+
+# PHẦN VI — MÔI TRƯỜNG KIỂM THỬ & NGHIỆM THU (`testlab/`)
+
+Chi tiết vận hành (kể cả bảng ánh xạ từng rule trong fixture → hạng mục nó chốt) nằm ở
+`testlab/README.md`. Mục này ghi **vai trò của nó trong quy trình bảo trì** và **giới hạn**,
+để không ai nhầm "lab PASS" = "chạy được trên Panorama thật".
+
+## VI.1. Hai tầng kiểm chứng, không thay thế nhau
+
+| Tầng | Lệnh | Phủ cái gì | Không phủ cái gì |
+|---|---|---|---|
+| **Unit test** | `python -m unittest discover -s tests -q` | Luật nghiệp vụ thuần + 8 điểm hạ tầng PHẦN 0 ở mức hàm | Lớp HTTP: op-command thật, parse phản hồi thật, hành vi khi Panorama **từ chối** request |
+| **Nghiệm thu lab** | `python testlab/run_all_features.py --auto` | Đúng các hàm mà GUI gọi, qua **HTTPS thật** tới Panorama giả lập: cả 3 tab + cả 8 điểm 0.1→0.8 | Việc **vẽ widget** (cần `python3-tk`) và **hành vi của thiết bị thật** |
+
+Lab được nối vào bộ test chung qua `tests/test_testlab_acceptance.py` → `discover -s tests` chạy
+luôn 68 ca nghiệm thu (tự `skipTest` nếu máy thiếu `cryptography`).
+
+## VI.2. Ba điều lab cố tình làm khó tool (đừng "sửa" cho dễ)
+
+1. **Op-command dataplane bị TỪ CHỐI khi thiếu `target=`** (`security-policy-match`,
+   `rule-hit-count`) — đúng như Panorama thật. Quên truyền `target` là **lộ ra ngay** thay vì âm
+   thầm trả kết quả sai. Đây là cách chốt 0.5 và 0.7.
+2. **Mọi lệnh ghi chỉ ghi vào `testlab/.journal.log`**, không bao giờ sửa file cấu hình, và
+   `commit` **bị từ chối** → journal là **bằng chứng kiểm tra xpath** (phải trỏ đúng
+   `device-group/entry[@name=...]` + `pre|post-rulebase`), và luật D6 được chốt bằng máy.
+3. **Response op-command được lồng đúng cây** (`device-group|shared` + `pre|post-rulebase`) chứ
+   không trả danh sách phẳng → buộc tool phải **tự suy `Vi tri Rule`** từ chính response (D9:
+   2 Device Group được phép trùng tên rule). Chính điểm này đã **lộ ra 1 lỗ hổng thật** — xem
+   entry XIV ngày 2026-10-20 về hit-count bỏ sót rule Shared.
+
+## VI.3. Quy ước fixture (phải giữ khi thêm case mới)
+
+- Fixture là **hệ Panorama thật sự**, không phải 1 rulebase phẳng: `DG-ALL → DG-DC → DG-HN`,
+  Template + Template Stack, 2 thiết bị, 13 rule rải **đủ 4 vị trí** (Shared-PRE / DG-PRE /
+  DG-POST / Shared-POST), nhánh `<readonly>`, object bị DG con đè.
+- Rule có tên **kết thúc bằng `-NOHIT`** → Panorama giả lập trả **0 hit**. Marker **tường minh**
+  như vậy là có lý do: bản đầu đoán theo từ khoá (`SHADOW`, `OLD`…) và đã **đoán nhầm** 1 rule
+  trong fixture → làm sai 1 ca kiểm thử.
+- **NAT của Device Group phải nằm trong `pre-rulebase/nat/rules` hoặc `post-rulebase/nat/rules`**
+  (giống security), **không** đặt thẳng dưới `<entry>` — đặt sai thì `assemble_nat_rules()` đọc ra
+  0 rule. Lỗi này đã từng xảy ra trong chính fixture và bị lab bắt.
+- Mỗi rule gắn với **một** hạng mục cần chốt. Thêm luật mới thì **thêm rule mới**, đừng đổi ý
+  nghĩa rule đang có (làm hỏng ca khác một cách âm thầm).
+
+## VI.4. Khi lab FAIL thì sửa ở đâu
+
+Theo đúng thứ tự: (1) **giả định/kỳ vọng** mình viết sai → đọc lại PHẦN 0 và luật ở II/III/IV;
+(2) **fixture** sai so với cấu trúc Panorama thật; (3) **mock** trả phản hồi không giống thiết bị
+thật; (4) **cuối cùng** mới tới code sản phẩm. **Tuyệt đối không nới lỏng assert để lab xanh.**
+Thực tế đợt 2026-10-20: 3 ca FAIL → 2 ca là **fixture sai** (NAT đặt sai tầng) và 1 ca là **lỗ
+hổng thật của sản phẩm** (hit-count bỏ sót phạm vi Shared) — không ca nào là "assert quá khắt khe".
+
 ---
 
 # PHẦN XIV — NHẬT KÝ THAY ĐỔI GẦN NHẤT
 
 > Chỉ liệt kê ngắn gọn. Chi tiết luật nghiệp vụ đã có sẵn ở Phần 0/II/III/IV — không lặp lại.
 > **Quy tắc V.4**: mỗi dòng dưới đây tương ứng 1 commit đồng bộ code + md + single (từ 2026-09-02, single luôn sinh trực tiếp).
+
+- **[2026-10-20b] Tài liệu: thêm mục TÌNH TRẠNG HIỆN TẠI + PHẦN VI (Môi trường kiểm thử) + I.2 cây thư mục thật + V.4.1 QUY TẮC TIÊN QUYẾT 7 bước — file đã sửa: `PaloPANORAMA_single.md` — lý do: tài liệu đã đủ LUẬT nhưng thiếu 3 thứ mà người tiếp nhận bảo trì cần ngay: bản hiện tại là gì, đã kiểm chứng tới đâu, và quy trình bắt buộc mỗi lần sửa.**
+  - **Thiếu "ảnh chụp hiện tại"**: muốn biết bản này ở đâu, kiểm chứng tới đâu thì phải đọc ngược toàn bộ changelog XIV rồi tự ghép. Thêm mục **TÌNH TRẠNG HIỆN TẠI** ngay đầu tài liệu: commit HEAD, branch, SHA256 bản gộp, số test, số ca lab, kèm **bảng "đã kiểm chứng / CHƯA"** nói thẳng 5 thứ chưa làm được (GUI thật, Panorama thật, schema `<shared>` của hit-count, rule cục bộ trên firewall, và việc `policy-match`/`rule-hit-count` trong lab chỉ là mô phỏng).
+  - **`testlab/` chỉ được mô tả trong 1 entry changelog** → dễ hiểu nhầm "lab PASS = chạy được trên Panorama thật". Thêm **PHẦN VI**: 2 tầng kiểm chứng phủ/không phủ cái gì; **3 điều lab cố tình làm khó tool** (từ chối op-command thiếu `target`, chỉ ghi journal + từ chối `commit`, trả response **lồng đúng cây** để buộc tool tự suy `Vi tri Rule`); quy ước fixture phải giữ (hệ Panorama thật 3 DG, marker `-NOHIT`, **NAT phải nằm trong pre/post-rulebase**, mỗi rule chốt 1 hạng mục); và **thứ tự truy nguyên khi lab FAIL** (giả định → fixture → mock → cuối cùng mới tới code; tuyệt đối không nới lỏng assert). Ghi lại luôn kết quả thật của đợt này: 3 ca FAIL = 2 ca fixture sai + 1 **lỗ hổng thật của sản phẩm**, không ca nào do assert khắt khe.
+  - **I.2 cây thư mục**: trước đây chỉ có 1 đoạn văn trỏ sang tài liệu bản standalone và còn gọi package theo tên cũ `check_rule/`, `check_ip/`. Nay có cây thư mục thật với hậu tố `_pan`, kèm `tests/` và `testlab/`, mỗi file 1 dòng vai trò; đổi `I.2–I.8` thành `I.3–I.8`. Sửa luôn I.1 còn ghi tên bản gộp legacy `PaloRuleSearchSuite_single.py`.
+  - **Siết quy tắc bảo trì (V.4.1)**: từ nay 1 lần bảo trì chỉ HOÀN THÀNH khi đủ **7 bước trong CÙNG 1 commit** — (1) sửa đúng file cấu phần (đụng nguồn dữ liệu Panorama thì đọc lại PHẦN 0 trước); (2) cập nhật mục TÌNH TRẠNG HIỆN TẠI; (3) thêm entry XIV theo đúng 5 phần *lỗi → nguyên nhân gốc → cách sửa → cố tình KHÔNG đổi gì → bằng chứng đo thật*; (4) sửa luôn PHẦN 0 (nếu luật hạ tầng đổi) hoặc II/III/IV (nếu luật nghiệp vụ đổi); (5) **mở rộng `testlab/` để mỗi lỗi vừa sửa có ít nhất 1 ca chốt lại**; (6) chạy thật và **dán số thật**; (7) sinh lại bản gộp + `--check` + ghi SHA mới. Kèm yêu cầu **bắt buộc nói rõ phần CHƯA làm** trong mỗi entry.
+  - Kiểm chứng: chỉ sửa tài liệu, **không đụng một dòng code nào** → `discover -s tests` vẫn **221 test OK (skipped=1)**, `testlab/run_all_features.py --auto` vẫn **68/68 PASS**, `tools/build_panorama_single.py --check` vẫn báo đồng bộ, `PaloPANORAMA_single.py` giữ nguyên SHA256 `290f0125b1d14f05238ad29ea1d678862adc5b540fb3eaaf81ef3252e4cb4adb`.
+  - **CHƯA làm / hạn chế còn lại:** không đổi so với entry dưới — vẫn chưa chạy GUI thật, chưa chạy với Panorama thật, schema `<shared>` của `rule-hit-count` chưa xác nhận trên thiết bị (đã suy giảm mềm), rule cục bộ trên firewall chưa có ô nạp trên GUI.
 
 - **[2026-10-20] MÔI TRƯỜNG CHẠY THỬ `testlab/` (Panorama giả lập) + vá lỗ hổng hit-count KHÔNG BAO GIỜ áp dụng cho rule Shared — file đã sửa/thêm: `testlab/{mock_panorama_api.py,make_samples.py,run_all_features.py,README.md}`, `testlab/fixtures/{running_config.xml,candidate_config.xml}`, `tests/test_testlab_acceptance.py`, `check_audit_pan/pan_api.py`, `tests/test_verify_batch.py`, `.gitignore` — lý do: trước đợt này toàn bộ kiểm chứng là unit test với XML giả lập trong RAM, chưa có đường nào chạm tới lớp HTTP/HTTPS thật và chưa có cách để người dùng tự nghiệm thu trước khi mang ra Panorama production.**
 
