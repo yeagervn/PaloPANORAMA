@@ -9,6 +9,7 @@ detectors.py - 3 ham phat hien cua CHECK AUDIT (Mục 4 require.md):
         _find_unused_rules()        UNUSED - rule khong co hits >= 30 ngay (4.4, D10)
 """
 
+import bisect
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -124,6 +125,52 @@ def _zones_cover(z1: List[str], z2: List[str]) -> bool:
     return set(z1) >= set(z2)
 
 
+def _zones_cover_fast(i1: int, i2: int, from_any, to_any, from_zone_sets, to_zone_sets,
+                       is_from: bool) -> bool:
+    """Ban FAST cua _zones_cover(): dung frozenset precompute thay vi dung set moi
+    lan goi (vong lap O(n^2) tren rulebase hang nghin rule).
+
+    QUAN TRONG: phai copy DUNG luat da SUA cua _zones_cover() - "R1 any -> cover;
+    R2 any ma R1 cu the -> KHONG cover". Ban toi uu cu cua Firewall standalone con
+    giu `from_any[i1] or from_any[i2] -> True` (false-positive khi R2=any) nen
+    KHONG duoc bung nguyen xi sang day."""
+    if is_from:
+        if from_any[i1]:
+            return True
+        if from_any[i2]:
+            return False
+        return from_zone_sets[i1] >= from_zone_sets[i2]
+    if to_any[i1]:
+        return True
+    if to_any[i2]:
+        return False
+    return to_zone_sets[i1] >= to_zone_sets[i2]
+
+
+def _covers_rule_fast(r1: RuleSnapshot, r2: RuleSnapshot, i1: int, i2: int,
+                      from_any, to_any, from_zone_sets, to_zone_sets) -> bool:
+    """Ban FAST cua _covers_rule() cho vong lap O(n^2): zone precomputed, thu tu
+    kiem tra re->dat giu nguyen. `r1.disabled` da duoc loc truoc qua
+    `enabled_indices` nen khong check lai o day."""
+    if not _zones_cover_fast(i1, i2, from_any, to_any, from_zone_sets, to_zone_sets, True):
+        return False
+    if not _zones_cover_fast(i1, i2, from_any, to_any, from_zone_sets, to_zone_sets, False):
+        return False
+    if r1.resolved_source is None or r2.resolved_source is None:
+        return False
+    if not r1.resolved_source.covers(r2.resolved_source):
+        return False
+    if r1.resolved_destination is None or r2.resolved_destination is None:
+        return False
+    if not r1.resolved_destination.covers(r2.resolved_destination):
+        return False
+    if r1.resolved_service is None or r2.resolved_service is None:
+        return False
+    if not r1.resolved_service.covers(r2.resolved_service):
+        return False
+    return True
+
+
 def _unreachable_detail_fragment(r1: RuleSnapshot, r2: RuleSnapshot) -> str:
     frag = f"Bị che bởi rule '{r1.name}' (index {r1.index}, action={r1.action})"
     if r2.disabled:
@@ -170,12 +217,23 @@ def _find_unreachable_rules(rules: List[RuleSnapshot], resolver, svc_resolver) -
     """
     _resolve_rules(rules, resolver, svc_resolver)
 
+    # TOI UU (giu nguyen 100% dieu kien 5-dieu-kien Muc 4.3, chi giam so lan tinh
+    # lai cung 1 gia tri): precompute zone set + chi duyet R1 ENABLED co index < i2.
+    n = len(rules)
+    from_zone_sets = [frozenset(r.from_zones) for r in rules]
+    to_zone_sets = [frozenset(r.to_zones) for r in rules]
+    from_any = ["any" in r.from_zones for r in rules]
+    to_any = ["any" in r.to_zones for r in rules]
+    enabled_indices = [i for i, r in enumerate(rules) if not r.disabled]
+
     shadow: Dict[Tuple[str, str], dict] = {}
-    for i2 in range(len(rules)):
+    for i2 in range(n):
         r2 = rules[i2]
-        for i1 in range(i2):
+        upto = bisect.bisect_left(enabled_indices, i2)
+        for i1 in enabled_indices[:upto]:
             r1 = rules[i1]
-            if not _covers_rule(r1, r2):
+            if not _covers_rule_fast(r1, r2, i1, i2, from_any, to_any,
+                                      from_zone_sets, to_zone_sets):
                 continue
             entry = {
                 "shadowed_by_rule_name": r1.name,
@@ -195,9 +253,12 @@ def _find_unreachable_rules(rules: List[RuleSnapshot], resolver, svc_resolver) -
 # 4.4 NHANH UNUSED (No Hits) - du lieu chi lay tu Policy Optimizer rule-hit-count
 # ============================================================================
 def _find_unused_rules(rules: List[RuleSnapshot], hit_stats: Dict[Tuple[str, str], RuleHitStat],
-                       now: NOW_TYPE) -> Dict[Tuple[str, str], dict]:
+                       now: NOW_TYPE,
+                       threshold_days: int = UNUSED_RULE_THRESHOLD_DAYS
+                       ) -> Dict[Tuple[str, str], dict]:
     """
-    Nguong CO DINH 30 ngay (UNUSED_RULE_THRESHOLD_DAYS). Rule khong co du lieu
+    Nguong so ngay khong hit - mac dinh UNUSED_RULE_THRESHOLD_DAYS (30), co the
+    ghi de qua GUI (`threshold_days`). Rule khong co du lieu
     hit (stat None) -> bo qua, khong doan. hit_stats rong (API khong ho tro) ->
     ham nay khong sinh ket qua gi, nhanh UNREACHABLE van chay doc lap (D10).
     SỬA 2026-09-02: hit_stats khoá theo (rule_name, vi_tri) để xử lý trùng tên khác DG (D9).
@@ -220,7 +281,7 @@ def _find_unused_rules(rules: List[RuleSnapshot], hit_stats: Dict[Tuple[str, str
         no_hit_days: Optional[int]
         if stat.hit_count and stat.hit_count > 0 and stat.last_hit_timestamp:
             no_hit_days = (now - stat.last_hit_timestamp).days
-            if no_hit_days < UNUSED_RULE_THRESHOLD_DAYS:
+            if no_hit_days < threshold_days:
                 continue
             reason_detail = (
                 f"Không có hits trong {no_hit_days} ngày "
@@ -231,8 +292,8 @@ def _find_unused_rules(rules: List[RuleSnapshot], hit_stats: Dict[Tuple[str, str
             if stat.rule_creation_timestamp is None:
                 continue  # khong du du lieu -> khong doan bung
             no_hit_days = (now - stat.rule_creation_timestamp).days
-            if no_hit_days < UNUSED_RULE_THRESHOLD_DAYS:
-                continue  # rule moi tao, chua du 30 ngay
+            if no_hit_days < threshold_days:
+                continue  # rule moi tao, chua du nguong
             reason_detail = (
                 f"Chưa từng có hit nào kể từ khi tạo rule ({no_hit_days} ngày, "
                 f"tạo lúc: {stat.rule_creation_date})"
@@ -256,14 +317,15 @@ def _find_unused_rules(rules: List[RuleSnapshot], hit_stats: Dict[Tuple[str, str
 # 4.5 SHADOW RULES - hop nhat 2 nhanh UNREACHABLE + UNUSED
 # ============================================================================
 def find_shadow_rules(rules: List[RuleSnapshot], resolver, svc_resolver,
-                      hit_stats: Dict[Tuple[str, str], RuleHitStat], now: NOW_TYPE) -> List[Finding]:
+                      hit_stats: Dict[Tuple[str, str], RuleHitStat], now: NOW_TYPE,
+                      threshold_days: int = UNUSED_RULE_THRESHOLD_DAYS) -> List[Finding]:
     """
     Ham public duy nhat gui.py goi cho tinh nang "Shadow Rules". 1 rule dinh ca
     2 ly do chi tao DUNG 1 Finding, detail noi ca 2 mo ta bang dau " | ".
     SỬA 2026-09-02: hit_stats và unused_map khoá theo (rule_name, vi_tri) (D9).
     """
     unreachable_map = _find_unreachable_rules(rules, resolver, svc_resolver)
-    unused_map = _find_unused_rules(rules, hit_stats, now)
+    unused_map = _find_unused_rules(rules, hit_stats, now, threshold_days)
 
     out: List[Finding] = []
     for r in rules:

@@ -3,11 +3,11 @@ import ipaddress
 import time  # noqa: F401 - giu lai phong khi can do dac biet cho troubleshoot sau nay
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Dict, Set, Any
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from .core import SecurityRule, is_literal_ip_or_cidr, fetch_security_policy_match
 from .resolver import ResolvedAddr, ResolvedService, GroupResolver, ServiceResolver
-from .index import DeviceIndex, find_existing_ip_representation, find_best_covering_group, resolve_zone_for_ip, find_existing_service_representation
+from .index import DeviceIndex, find_existing_ip_representation, find_best_covering_group, resolve_zone_for_ip, find_existing_service_representation, find_existing_range_representation, global_find_rank_objects
 from .request import RequestRow
 
 
@@ -70,8 +70,37 @@ class RowResult:
     # Name Rule khi khong co FULL/TOP1-3 match nao.
     nearest_rule: Optional[SecurityRule] = None
     nearest_rule_kind: Optional[str] = None      # 'near_top2' | 'near_top3' | 'generic'
-    nearest_missing_side: Optional[str] = None   # 'source' (near_top2) | 'dest' (near_top3)
+    nearest_missing_side: Optional[str] = None   # 'source' (near_top2) | 'dest' (near_top3) | None (ben do THUC RA da khop du - xem SUA LOI trong classify_row)
     nearest_detail: Optional[str] = None         # "Dest x/y khop | Source x/y khop | Port du/thieu"
+    nearest_fully_covered: bool = False   # True khi near_top2/near_top3 nhung CA HAI ben (Source
+                                          # VA Dest) + Port deu da cover du qua wide-match, chi thieu
+                                          # dung dieu kien an toan exact-scope (khong co gi de "+ ADD")
+    # SUA LOI (10/2026): doi xung voi nearest_fully_covered nhung cho tier TOP2/TOP3.
+    # TOP2 chi bat buoc Dest cover du + exact-scope + Port du - KHONG he xet Source;
+    # TOP3 doi xung. Neu ben "gia dinh con thieu" do THUC RA da duoc chinh rule nay
+    # cover DU 100% (thuong qua 1 subnet rong nhu Net_10.1.1.0/24, ma tang bao cao
+    # LOCAL co y KHONG tinh la in_rule theo nguyen tac exact-only) thi KHONG con gi
+    # de "+ ADD" - exporter dung co nay de hien 'DA DUOC CHO PHEP' (xanh duong, kem
+    # khuyen nghi xac nhan Live Match) thay vi mau cam "+ ADD SOURCE/DEST" + "TAO MOI"
+    # SAI. Day la dung co che da ap dung cho near_top2/near_top3 tu ban 09/2026,
+    # truoc gio con thieu o TOP2/TOP3.
+    wide_fully_covered: bool = False
+    # Ly do Live Match khong hoan tat cho dong nay (chi dien khi Live Match DA DUOC
+    # BAT - co mgmt_ip/api_key - nhung try_live_match() tra ve None). Exporter dung
+    # 2 field nay de noi them 1 dong caveat rieng trong o Name Rule cho MOI action
+    # level (khong chi TOP4), vi day la thong tin ve QUA TRINH kiem tra, doc lap voi
+    # ket luan LOCAL cuoi cung.
+    live_match_skip_reason: Optional[str] = None   # LIVE_MATCH_SKIP_SCALE | LIVE_MATCH_SKIP_INCONCLUSIVE
+    live_match_skip_detail: Optional[str] = None   # mo ta cu the (so combo, combo loi...)
+    # SUA LOI (10/2026 - "tool khong doc duoc" ma khong he bao gi): token Source/Dest
+    # nao parse_ip_token() khong hieu truoc gio bi classify_row() LOC BO AM THAM khoi
+    # src_ranges/dst_ranges - neu dong con token khac hop le thi dong do van chay binh
+    # thuong va co the ra "FULL MATCH" xanh la, trong khi 1 dai IP cua request da BIEN
+    # MAT khoi ket qua ma khong co bat ky canh bao nao. 2 field duoi day luu lai dung
+    # cac token do de exporter in 1 dong DO ngay trong o Source/Dest va chan khong cho
+    # dong do duoc to xanh "FULL MATCH".
+    unparsed_source: List[str] = field(default_factory=list)
+    unparsed_dest: List[str] = field(default_factory=list)
 
 
 # =========================================================================
@@ -137,7 +166,7 @@ def _side_all_for_shadow(resolved: ResolvedAddr, ranges) -> bool:
     an toan (bao "FULL MATCH" trong khi thuc te co the bi 1 rule deny=any chan truoc)."""
     if resolved.is_any:
         return True
-    return all(resolved.covers_range_wide(s, e) for (s, e, _t) in ranges)
+    return all(resolved.covers_input_wide(s, e) for (s, e, _t) in ranges)
 
 
 def _ports_covered_for_shadow(service: ResolvedService, ports) -> bool:
@@ -180,7 +209,18 @@ def _ranges_total_count(ranges) -> int:
     """Tong so dia chi ma 1 list (start,end,token) dang xet chiem (khong khu trung lap
     - du dung de so sanh voi ResolvedAddr.total_address_count() nham kiem tra 'group/
     field nay co CHI CHUA dung cac dia chi trong input, khong thua gi khac' hay khong."""
-    return sum(e - s + 1 for (s, e, _t) in ranges)
+    ivs = sorted((s, e) for (s, e, _t) in ranges)
+    total, cur_s, cur_e = 0, None, None
+    for a, b in ivs:
+        if cur_e is not None and a <= cur_e + 1:
+            cur_e = max(cur_e, b)
+        else:
+            if cur_e is not None:
+                total += cur_e - cur_s + 1
+            cur_s, cur_e = a, b
+    if cur_e is not None:
+        total += cur_e - cur_s + 1
+    return total
 
 
 def _is_exactly_scoped(resolved: ResolvedAddr, ranges) -> bool:
@@ -192,7 +232,27 @@ def _is_exactly_scoped(resolved: ResolvedAddr, ranges) -> bool:
     TAT CA cac object khac trong group do - khong chi rieng IP dang duoc yeu cau. CHI
     khi group/field do khop CHINH XAC 1:1 voi dung tap dang xet, goi y bo sung moi thuc
     su an toan."""
-    return resolved.total_address_count() == _ranges_total_count(ranges)
+    return resolved.union_address_count() == _ranges_total_count(ranges)
+
+
+def _exact_member_scope(members: List[Tuple[str, str, "ResolvedAddr"]], ranges) -> Optional[int]:
+    """Kiem tra field (Source hoac Dest cua 1 rule, co the gom NHIEU object khac
+    nhau) co chua DUNG 1 member RIENG LE dai dien CHINH XAC 1:1 cho toan bo
+    'ranges' cua request hay khong - khac voi _is_exactly_scoped() (xet TONG GOP
+    ca field, se bi false-negative khi field co them object KHONG lien quan cho
+    muc dich khac cua rule). Neu co, tra ve total_address_count() cua RIENG
+    member do (dung lam 'scope an toan that su' cho tier TOP2/TOP3 va tie-break,
+    thay vi bi tinh nham theo tong ca field). Tra ve None neu khong co member nao
+    khop tuyet doi rieng le - giu nguyen hanh vi cu (chi con dua vao
+    _is_exactly_scoped)."""
+    req_total = _ranges_total_count(ranges)
+    if req_total == 0:
+        return None
+    for _nm, _kind, resolved in members:
+        if resolved.union_address_count() == req_total and \
+           all(resolved.covers_input_wide(s, e) for (s, e, _t) in ranges):
+            return resolved.total_address_count()
+    return None
 
 
 def _shadow_warning_text(shadow: Optional[RuleInfo]) -> Optional[str]:
@@ -297,9 +357,150 @@ def _both_sides_any(ri: 'RuleInfo') -> bool:
 
 
 def _side_all(resolved: ResolvedAddr, ranges, wide: bool) -> bool:
+    """SUA LOI (10/2026): dung covers_input_wide/covers_input_exact thay cho
+    covers_range_wide/covers_range_exact - xem docstring covers_input_exact() trong
+    resolver.py. Ly do: 1 TOKEN INPUT dang RANGE duoc rule cover DU nho HOP nhieu
+    member lien ke (11 host object, hay 2 range object 100-104 + 105-110) truoc day
+    bi coi la CHUA cover nen tier roi xuong TOP2/TOP3/TOP4 va tool goi y '+ ADD
+    SOURCE/DEST' oan - trong khi tang BAO CAO (build_field_report) da dung dung hop
+    interval tu ban fix 09/2026 -> 2 tang lech nhau. Voi input la IP DON, 2 ham moi
+    cho ket qua Y HET 2 ham cu (da chung minh trong docstring resolver), nen thay
+    doi nay CHI tac dong den token input dang range/CIDR va CHI theo huong 'nhan ra
+    them coverage THAT SU co' - khong bao gio ngung nhan 1 coverage da nhan truoc day.
+    Nguyen tac exact-only cua thiet ke goc GIU NGUYEN: nhanh wide=False van KHONG
+    chap nhan subnet rong (ngoai tru member co bounds trung khit 1:1 voi input)."""
     if wide:
-        return all(resolved.covers_range_wide(s, e) for (s, e, _t) in ranges)
-    return all(resolved.covers_range_exact(s, e) for (s, e, _t) in ranges)
+        return all(resolved.covers_input_wide(s, e) for (s, e, _t) in ranges)
+    return all(resolved.covers_input_exact(s, e) for (s, e, _t) in ranges)
+
+
+def _find_full_set_exact_match(host_set: Set[int], idx: DeviceIndex
+                               ) -> Optional[Tuple[str, str]]:
+    """Tim 1 Address Object (Range/Wide dung doc lap) hoac 1 Address Group khop
+    tuyet doi 1:1 voi TOAN BO tap host IP goc cua field (dung du so dia chi,
+    khong thua khong thieu) - tra ve (ten, kind) hoac None.
+
+    Nguyen tac exact-only TUYET DOI khong noi long:
+    - Object doc lap: khoang [a, b] phai co dung bang len(host_set) dia chi VA
+      tap dia chi do phai trung khit host_set (object rong hon bao trum thua
+      dia chi ngoai tap -> loai).
+    - Group: tong dia chi thuc su (total_address_count) phai dung bang
+      len(host_set) VA tung IP phai duoc cover exact (covers_range_exact -
+      khong dung wide) - group co member thua/subnet rong -> loai nho dieu
+      kien dem bang nhau."""
+    n = len(host_set)
+    if not n:
+        return None
+    rng_hit = [nm for a, b, nm in idx.range_objs
+               if b - a + 1 == n and set(range(a, b + 1)) == host_set]
+    if rng_hit:
+        return (global_find_rank_objects(rng_hit, idx)[0], 'range')
+    wide_hit = [nm for a, b, nm in idx.wide_objs
+                if b - a + 1 == n and set(range(a, b + 1)) == host_set]
+    if wide_hit:
+        return (global_find_rank_objects(wide_hit, idx)[0], 'wide')
+    grp_hit = [gname for gname, resolved in idx.group_resolved.items()
+               if resolved.total_address_count() == n and
+               all(resolved.covers_range_exact(ip, ip) for ip in host_set)]
+    if grp_hit:
+        return (min(grp_hit, key=lambda g: (idx.group_member_count.get(g, 10 ** 9), g)), 'group')
+    return None
+
+
+def _field_union_cover(rule_members: List[Tuple[str, str, ResolvedAddr]],
+                        start: int, end: int, use_wide: bool
+                        ) -> Optional[Tuple[str, str]]:
+    """SUA LOI (10/2026 - "range da nam DU trong rule nhung van bao TAO MOI"): cac
+    nhanh bao cao range truoc day CHI xet TUNG MEMBER RIENG LE
+    (`resolved.covers_range_exact_union(s, e)` cho tung member) - nen 1 dai input duoc
+    rule cover DU nho HOP NHIEU MEMBER KHAC NHAU cua cung 1 field (vd Source cua rule
+    gom 2 object Range_100-104 + Range_105-110, input la 10.1.1.100-110) van roi xuong
+    'exists'/'new' -> bao "can ADD/TAO MOI" oan. Ham nay bu dung khoang trong do: hop
+    interval cua TOAN BO member trong field roi kiem tra lai.
+
+    Tra ve (ten_dai_dien, kind) cua CAC member THUC SU gop phan cover dai nay (de admin
+    doi chieu duoc 'nho object nao'), hoac None neu hop cac member VAN khong du.
+
+    - `use_wide=False`: exact-only (host + ip-range), KHONG tinh subnet rong - dung cho
+      bao cao LOCAL, giu nguyen nguyen tac thiet ke goc.
+    - `use_wide=True`: chap nhan ca subnet rong - CHI dung cho bao cao LIVE_MATCH (da
+      duoc chinh firewall xac nhan allow).
+    Neu field co member 'any' thi da duoc xu ly truoc do o noi goi, khong vao day.
+    """
+    if not rule_members:
+        return None
+    merged = ResolvedAddr()
+    for _nm, _kind, resolved in rule_members:
+        if resolved.is_any:
+            return (_nm, _kind)
+        merged.exact_singles |= resolved.exact_singles
+        merged.exact_ranges += resolved.exact_ranges
+        if use_wide:
+            merged.wide_ranges += resolved.wide_ranges
+    merged._iv_cache.clear()
+    covered = (merged.covers_range_wide_union(start, end) if use_wide
+               else merged.covers_range_exact_union(start, end))
+    if not covered:
+        return None
+
+    # Xac dinh dung nhung member co dong gop dia chi NAM TRONG [start, end] - khong
+    # liet ke bua cac member khong lien quan.
+    contributors: List[Tuple[str, str]] = []
+    for nm, kind, resolved in rule_members:
+        ivs = [(x, x) for x in resolved.exact_singles] + list(resolved.exact_ranges)
+        if use_wide:
+            ivs += list(resolved.wide_ranges)
+        if any(a <= end and start <= b for a, b in ivs):
+            contributors.append((nm, kind))
+    if not contributors:
+        return None
+    if len(contributors) == 1:
+        return contributors[0]
+    names = [nm for nm, _k in contributors]
+    label = " + ".join(names[:3])
+    if len(names) > 3:
+        label += f" + {len(names) - 3} object khac"
+    kind = 'group' if any(k == 'group' for _n, k in contributors) else 'multi'
+    return (label, kind)
+
+
+def _mark_side_fully_covered(report: List[MissingItem], ranges,
+                              rule_members: List[Tuple[str, str, ResolvedAddr]]) -> None:
+    """SUA LOI (10/2026): chi duoc goi khi da XAC NHAN rule dang xet cover DU 100% ben
+    nay (RowResult.wide_fully_covered) - doi cac item con dang 'new'/'exists' thanh
+    'in_rule' kem ten member chiu trach nhiem, de o Source/Dest KHONG con dong do
+    "TAO MOI"/cam "can ADD" trai nguoc voi ket luan "DA DUOC CHO PHEP" o cot Name Rule.
+
+    KHONG noi long nguyen tac exact-only cua build_field_report(): ham do van giu y
+    nguyen hanh vi (va test test_wide_only_group_not_in_rule_local van dung) - day chi
+    la buoc HAU XU LY o classify_row, chay DUY NHAT khi ca ben da duoc chung minh cover
+    du, nen khong the sinh ra goi y "nhet IP vao object rong" nao.
+    """
+    if not report or not rule_members:
+        return
+    disp_to_se = {}
+    for (s, e, t) in ranges:
+        disp_to_se[t['display']] = (s, e)
+    for m in report:
+        if m.status not in ('new', 'exists'):
+            continue
+        s, e = disp_to_se.get(m.range_display or m.display, (m.ip_int, m.ip_int))
+        found = None
+        for name, kind, resolved in rule_members:
+            if kind == 'any':
+                found = (name, 'any')
+                break
+            if resolved.covers_input_wide(s, e):
+                found = (name, kind)
+                break
+        if found is None:
+            found = _field_union_cover(rule_members, s, e, use_wide=True)
+        if found is None:
+            continue
+        m.status = 'in_rule'
+        m.existing_name, m.existing_kind = found
+        m.group_coverage_pct = None
+        m.group_member_count = None
 
 
 def build_field_report(ranges, rule_members: List[Tuple[str, str, ResolvedAddr]],
@@ -338,6 +539,29 @@ def build_field_report(ranges, rule_members: List[Tuple[str, str, ResolvedAddr]]
 
     _greedy_assign(rule_members, 'in_rule', check_wide=False)
 
+    # FULL-SET EXACT MATCH (chay SAU greedy de bao ve rule da khop khit): neu
+    # _greedy_assign da gan HET tap goc thanh in_rule (rule da co san dai dien
+    # chinh xac cho tung IP) thi giu nguyen - khong danh lai thanh exists.
+    # Nguoc lai (con residual), kiem tra 1 object/group khop tuyet doi 1:1 voi
+    # TOAN BO tap goc: neu co, bao cao THONG NHAT toan bo IP la exists theo
+    # object/group do (ke ca IP da co san trong rule qua Host rieng le - tranh
+    # che vun bao cao), residual khong bao gio roi vao new/TAO MOI oan.
+    # Ly do phai dung tap GOC (host_items) chu khong phai remaining: remaining
+    # da thieu cac IP in_rule nen phep so khop 1:1 voi Range bao tron ca dai
+    # (vd Range_10.31.0.120-130, 11 dia chi) se that bai oan.
+    if remaining:
+        full_match = _find_full_set_exact_match(
+            {s for (s, e, t) in host_items}, idx)
+        if full_match is not None:
+            full_name, full_kind = full_match
+            full_mcount = idx.group_member_count.get(full_name) \
+                if full_kind == 'group' else None
+            results = [MissingItem(s, ip_display[s], 'exists', full_name,
+                                   full_kind, group_coverage_pct=100,
+                                   group_member_count=full_mcount)
+                       for (s, e, t) in host_items]
+            remaining = set()
+
     while remaining:
         found = find_best_covering_group(remaining, idx)
         if not found:
@@ -367,45 +591,18 @@ def build_field_report(ranges, rule_members: List[Tuple[str, str, ResolvedAddr]]
         disp = t['display']
         found_exact_in_rule = None
         for name, kind, resolved in rule_members:
-            if resolved.covers_range_exact(s, e):
+            if resolved.covers_input_exact(s, e):
                 found_exact_in_rule = (name, kind)
                 break
+        if found_exact_in_rule is None:
+            # Khong member nao RIENG LE cover du -> thu HOP toan bo member cua field
+            # (vd Source = Range_100-104 + Range_105-110, input 100-110).
+            found_exact_in_rule = _field_union_cover(rule_members, s, e, use_wide=False)
         if found_exact_in_rule:
             results.append(MissingItem(s, disp, 'in_rule', found_exact_in_rule[0], found_exact_in_rule[1],
                                         is_range_input=True, range_display=disp))
             continue
-        exists_as = None
-        group_candidates = [gname for gname, resolved in idx.group_resolved.items()
-                             if resolved.has_exact_member(s, e)]
-        if group_candidates:
-            # Nhieu group co the cung co 1 member khop tuyet doi voi input nay (vd 1
-            # group nho, purpose-built CHI co dung member nay, VA 1 group catch-all
-            # lon hon cung tinh co chua member do). Luon chon group co TONG DIA CHI
-            # THUC SU nho nhat (khong phai so member khai bao - 1 group it member
-            # nhung member la range/wide rong van co the "to" hon group nhieu member
-            # nho) - dai dien sat/chinh xac nhat, khong de group lon "an theo thu tu quet".
-            best_gname = min(group_candidates, key=lambda g: idx.group_resolved[g].total_address_count())
-            exists_as = (best_gname, 'group')
-        if not exists_as:
-            exact_candidates = []
-            for a, b, nm in idx.range_objs:
-                if a == s and b == e:
-                    exact_candidates.append((nm, 'range'))
-            for a, b, nm in idx.wide_objs:
-                if a == s and b == e:
-                    exact_candidates.append((nm, 'wide'))
-            if exact_candidates:
-                exists_as = exact_candidates[0]
-            else:
-                # Khong co khop tuyet doi nao. Chi cho phep fallback ve object 'range' gan
-                # nhat (khoang IP cu the do admin tao, thuong sat nghia thuc te) - TUYET DOI
-                # KHONG fallback sang object 'wide' (netmask/subnet) khi khong khop tuyet doi,
-                # vi loai nay co the rat rong (vd /8, /0) va se bi coi la "gia tri qua lon"
-                # khong dai dien chinh xac cho input.
-                near_candidates = [(a, b, nm) for a, b, nm in idx.range_objs if a <= s and e <= b]
-                if near_candidates:
-                    a, b, nm = min(near_candidates, key=lambda c: c[1] - c[0])
-                    exists_as = (nm, 'range')
+        exists_as = find_existing_range_representation(s, e, idx)
         if exists_as:
             results.append(MissingItem(s, disp, 'exists', exists_as[0], exists_as[1],
                                         is_range_input=True, range_display=disp))
@@ -437,7 +634,9 @@ def build_live_match_field_report(ranges, rule_members: List[Tuple[str, str, Res
                 return (name, 'any')
             if resolved.covers_range_wide_confirmed(s, e):
                 return (name, kind)
-        return None
+        # Khong member nao RIENG LE cover du -> thu HOP toan bo member cua field
+        # (LIVE chap nhan ca subnet rong vi firewall da xac nhan allow).
+        return _field_union_cover(rule_members, s, e, use_wide=True)
 
     results: List[MissingItem] = []
 
@@ -447,14 +646,32 @@ def build_live_match_field_report(ranges, rule_members: List[Tuple[str, str, Res
             nm, kind = found
             results.append(MissingItem(s, ip_display[s], 'in_rule', nm, kind))
             continue
-        # Hiem khi xay ra vi API da confirm ALLOW, nhung van du phong: tim dai dien
-        # tren toan thiet bi, neu khong co gi thi moi coi la 'new'.
+        # Tu v3: day la nhanh THUONG GAP (Live Match chi con dung SO IP dai dien de
+        # xac dinh rule, khong con test het moi combo) - tim dai dien tren toan thiet
+        # bi cho IP KHONG khop truc tiep member cua rule, neu khong co gi thi moi coi
+        # la 'new' (that su can bo sung).
         ex = find_existing_ip_representation(s, idx)
         if ex:
             nm, kind = ex
             results.append(MissingItem(s, ip_display[s], 'exists', nm, kind))
         else:
             results.append(MissingItem(s, ip_display[s], 'new', None, None))
+
+    # SUA LOI: build_live_match_field_report truoc gio BO QUA group_coverage_pct,
+    # khien hien thi cot Source/Dest luon liet ke het danh sach IP thay vi rut gon
+    # "cover full IP(s)" du group da cover 100% dau vao. Tinh lai dung cong thuc
+    # voi build_field_report (LOCAL): % theo TONG so host item cua field nay.
+    total = len(host_items)
+    if total:
+        in_rule_counts: Dict[str, int] = {}
+        for m in results:
+            if m.status == 'in_rule' and m.existing_kind != 'any':
+                in_rule_counts[m.existing_name] = in_rule_counts.get(m.existing_name, 0) + 1
+        for m in results:
+            if m.status == 'in_rule' and m.existing_kind != 'any':
+                m.group_coverage_pct = round(in_rule_counts[m.existing_name] / total * 100)
+                m.group_member_count = (idx.group_member_count.get(m.existing_name)
+                                         if m.existing_kind == 'group' else None)
 
     for (s, e, t) in range_items:
         disp = t['display']
@@ -463,6 +680,12 @@ def build_live_match_field_report(ranges, rule_members: List[Tuple[str, str, Res
             nm, kind = found
             results.append(MissingItem(s, disp, 'in_rule', nm, kind,
                                         is_range_input=True, range_display=disp))
+            continue
+        ex = find_existing_range_representation(s, e, idx)
+        if ex:
+            results.append(MissingItem(s, disp, 'exists', ex[0], ex[1],
+                                        is_range_input=True, range_display=disp,
+                                        group_member_count=(idx.group_member_count.get(ex[0]) if ex[1] == 'group' else None)))
             continue
         results.append(MissingItem(s, disp, 'new', None, None,
                                     is_range_input=True, range_display=disp))
@@ -531,6 +754,16 @@ def _live_match_test_ips(tok: dict) -> List[int]:
     return [tok['start']]
 
 
+# Ly do try_live_match() khong hoan tat, dung de build caveat minh bach o tang
+# LOCAL fallback (xem RowResult.live_match_skip_reason). 2 nhom PHAN BIET:
+# - SCALE: chua goi API firewall lan nao (vuot gioi han quy mo / khong co combo
+#   hop le) - y nghia "CHUA kiem tra gi ca".
+# - INCONCLUSIVE: da goi API nhung khong ket luan duoc (loi/timeout, action !=
+#   allow, khop nhieu rule khac nhau) - y nghia "da kiem tra va co van de that".
+LIVE_MATCH_SKIP_SCALE = "scale_limit"          # nhom 1: chua goi API lan nao
+LIVE_MATCH_SKIP_INCONCLUSIVE = "inconclusive"  # nhom 2: da goi API nhung khong ket luan duoc
+
+
 def try_live_match(
     row: RequestRow,
     mgmt_ip: str,
@@ -538,16 +771,73 @@ def try_live_match(
     vsys: str,
     rule_infos: List[RuleInfo],
     idx: DeviceIndex,
-    max_combos: int = 50,
+    max_combos: int = 300,
     max_workers: int = 30,
     log_func=None,
+    max_port_span: int = 50,
+    skip_info: Optional[dict] = None,
+    live_match_concurrency: Optional[int] = None,
+    live_match_semaphore: Optional[Any] = None,
+    combo_cache: Optional[dict] = None,
     target_serial: Optional[str] = None,
 ) -> Optional[RowResult]:
-    """Gọi trực tiếp API Test Policy Match QUA PANORAMA (proxy) - BAT BUOC target"""
+    """Gọi API Test Policy Match QUA PANORAMA (proxy xuong dataplane firewall)
+
+    BAN PANORAMA (require.md 0.5): `test security-policy-match` chay tren DATAPLANE
+    cua 1 firewall cu the, Panorama chi forward - nen BAT BUOC co `target_serial`
+    (serial firewall). Thieu target -> tra None NGAY, IM LANG (roi thang xuong thuat
+    toan LOCAL), khong goi API, khong bao loi - dung tinh than "delegate hoan toan
+    cho firewall, khong doan bua" cua ban goc, chi them 1 dieu kien tien quyet
+    "phai biet doan ho AI". Moi luat con lai cua II.2.4 GIU NGUYEN TUYET DOI.
+
+    NGUYEN TAC (v3, thay the all-or-nothing cu): chi can 1 combo Source x Dest
+    x Port trong 1 dong tra `action=allow` la NHAN DIEN NGAY rule do (rule_name
+    dau tien khop allow), DUNG SOM cac combo con lai (huy future chua chay) de
+    tiet kiem API call - sau do dung LOCAL/static object matching
+    (build_live_match_field_report, khong can them API call nao) doi chieu
+    chinh xac TOAN BO Source/Dest request voi dung member cua rule vua xac
+    dinh: IP nao khop thi 'in_rule', IP nao khong khop tu roi vao 'exists'/'new'
+    nhu binh thuong. KHONG con abort vi 1 combo bi chan/loi/cho rule khac -
+    combo fail rieng le chi la 1 IP "con thieu" trong report. Chi khi KHONG co
+    combo nao allow moi tra None (INCONCLUSIVE) de classify_row() roi ve LOCAL.
+
+    `max_combos` (mac dinh 300) la tran an toan so combo/API call cho 1 dong -
+    cau hinh duoc tu GUI (o "Gioi han to hop Live Match"). `max_port_span`
+    (mac dinh 50) la gioi han rieng cho do dai 1 port-range don le, doc lap voi
+    `max_combos`. Khi khong hoan tat, ghi ly do vao `skip_info` (dict ngoai,
+    2 key 'reason'/'detail') truoc moi `return None` de `classify_row()` gan
+    tiep vao RowResult LOCAL fallback - admin nhin Excel biet ngay Live Match
+    co duoc thu hay khong va vi sao (khong chi nam trong log.txt).
+
+    HIEU NANG (09/2026, bat buoc di kem khi nang max_combos 50 -> 300):
+    - Ket qua duoc xu ly theo thu tu HOAN THANH thuc te (`as_completed`), KHONG
+      doi het nhu `executor.map()` truoc day. Ngay khi 1 combo tra
+      `action=allow` -> lay `rule_name` cua no, huy cac future CHUA chay
+      (`future.cancel()`) va DUNG SOM ngay lap tuc (1 combo allow DA DU de xac
+      dinh rule, khong can test tiep - tiet kiem API call + tai firewall).
+    - `live_match_semaphore` (threading.Semaphore DUNG CHUNG toan luot chay, do
+      `gui.py` khoi tao 1 lan, mac dinh 30): moi lan goi API that deu `with`
+      semaphore nay truoc - gioi han TONG so API call dong thoi tren toan tool,
+      doc lap voi so DONG chay song song (`max_workers`/`thread_count`). Neu
+      khong truyen, moi dong tu chay doc lap nhu truoc (tuong thich nguoc).
+    - `live_match_concurrency` (tuy chon): so worker cua executor NOI BO cho
+      vong goi API cua RIENG dong nay; mac dinh fallback ve
+      `min(max_workers, len(combinations))` nhu hanh vi cu.
+    - `combo_cache` (tuy chon, dict DUNG CHUNG toan luot chay): dedup combo
+      TRUNG nhau giua cac dong - key `(src_ip, dst_ip, port, proto)`, tra cache
+      truoc khi goi API, ghi vao cache sau khi goi (ket qua 1 combo la bat bien
+      trong 1 luot chay nen tai su dung khong anh huong do chinh xac)."""
+    def _mark_skip(reason: str, detail: str):
+        if skip_info is not None:
+            skip_info['reason'] = reason
+            skip_info['detail'] = detail
+
     if not mgmt_ip or not api_key:
         return None
-    # BAN PANORAMA (0.5): thieu Target Firewall (serial) -> Live Match tu bo qua ngay,
-    # im lang (roi thang xuong thuat toan local). Khong bao loi / khong goi API.
+    # BAN PANORAMA (0.5): thieu Target Firewall (serial) -> bo qua tier LIVE_MATCH
+    # ngay, im lang. KHONG ghi skip_info vi day khong phai "da thu nhung that bai"
+    # (scale/inconclusive) ma la "tinh nang chua du dieu kien tien quyet" - giong
+    # het cach zone-lookup tu vo hieu khi khong co du lieu Template.
     if not target_serial:
         return None
 
@@ -562,9 +852,11 @@ def try_live_match(
                 continue
             dst_ips = _live_match_test_ips(dst_tok)
             for (p_start, p_end, proto) in row.port_tokens:
-                if p_end - p_start > 50:
+                if p_end - p_start > max_port_span:
                     if log_func:
-                        log_func(f"[Live Match] Bỏ qua: dải port {p_start}-{p_end} quá rộng (>50).")
+                        log_func(f"[Live Match] Bỏ qua: dải port {p_start}-{p_end} quá rộng (>{max_port_span}).")
+                    _mark_skip(LIVE_MATCH_SKIP_SCALE,
+                               f"dai port {p_start}-{p_end} vuot qua gioi han {max_port_span}")
                     return None
                 for port in range(p_start, p_end + 1):
                     protocol_str = proto or 'tcp'
@@ -582,25 +874,93 @@ def try_live_match(
                  f"ket qua co the sai neu traffic thuc te la UDP.")
 
     if not combinations:
+        _mark_skip(LIVE_MATCH_SKIP_SCALE,
+                   "khong co to hop Source/Dest/Port hop le de test")
         return None
     if len(combinations) > max_combos:
         if log_func:
             log_func(f"[Live Match] Bỏ qua: {len(combinations)} tổ hợp Source/Dest/Port > giới hạn {max_combos}.")
+        _mark_skip(LIVE_MATCH_SKIP_SCALE,
+                   f"{len(combinations)} to hop > gioi han {max_combos}")
         return None
 
-    matched_rules = set()
+    matched_rule_name: Optional[str] = None
     error_messages: List[str] = []
 
     def _collect_error(msg):
         error_messages.append(msg)
 
-    def _check_one(combo):
+    def _fetch_one(combo):
+        """1 lan goi API that cho 1 combo: tra cache truoc (neu co), gioi han
+        dong thoi qua semaphore dung chung (neu co), ghi cache sau khi goi."""
+        if combo_cache is not None and combo in combo_cache:
+            return combo_cache[combo]
         s_ip, d_ip, port, proto = combo
-        return fetch_security_policy_match(mgmt_ip, api_key, s_ip, d_ip, port, proto, vsys=vsys,
-                                           target_serial=target_serial, log_func=_collect_error)
+        if live_match_semaphore is not None:
+            with live_match_semaphore:
+                res = fetch_security_policy_match(mgmt_ip, api_key, s_ip, d_ip, port, proto, vsys=vsys,
+                                                   target_serial=target_serial, log_func=_collect_error)
+        else:
+            res = fetch_security_policy_match(mgmt_ip, api_key, s_ip, d_ip, port, proto, vsys=vsys,
+                                               target_serial=target_serial, log_func=_collect_error)
+        if combo_cache is not None:
+            combo_cache[combo] = res
+        return res
 
-    with ThreadPoolExecutor(max_workers=min(max_workers, len(combinations))) as executor:
-        results = list(executor.map(_check_one, combinations))
+    def _check_one_result(combo, res) -> bool:
+        """SUA (v3): khong con abort khi gap combo fail/bi chan/loi rieng le - chi
+        ghi log roi bo qua, tiep tuc xet combo khac. Tra ve True NGAY KHI gap 1
+        combo action=allow dau tien (dung lam tin hieu DUNG SOM - da du de xac
+        dinh rule, khong can cho het cac combo con lai). Rule bi CHAN boi 1 rule
+        khac (vd action=drop cua 1 rule cleanup dung truoc) khong con lam mat
+        ket qua cua CA DONG nua - no chi la 1 IP/combo con thieu, se duoc LOCAL
+        doi chieu tinh chinh xac o buoc sau (build_live_match_field_report),
+        khong can goi them API nao nua cho no."""
+        nonlocal matched_rule_name
+        s_ip, d_ip, port, proto = combo
+        if not res:
+            if log_func:
+                log_func(f"[Live Match] {s_ip}->{d_ip}:{port}/{proto} không xác nhận được (lỗi/timeout).")
+            return False
+        if res.get("action") != "allow":
+            if log_func:
+                log_func(f"[Live Match] {s_ip}->{d_ip}:{port}/{proto} khớp rule "
+                          f"'{res.get('rule_name')}' nhưng action='{res.get('action')}' (không phải allow).")
+            return False
+        matched_rule_name = res.get("rule_name")
+        if log_func:
+            log_func(f"[Live Match] {s_ip}->{d_ip}:{port}/{proto} khớp rule "
+                      f"'{matched_rule_name}' action=allow - đã xác định được rule, dừng Live Match "
+                      f"sớm, chuyển sang đối chiếu tĩnh (LOCAL) với đúng rule này để tính phần còn thiếu.")
+        return True
+
+    # 1. Cac combo da co san trong cache - dung ngay khi gap 1 combo allow.
+    to_fetch = []
+    for combo in combinations:
+        if combo_cache is not None and combo in combo_cache:
+            if _check_one_result(combo, combo_cache[combo]):
+                break
+        else:
+            to_fetch.append(combo)
+
+    # 2. Goi API cho cac combo con lai - dung ngay khi gap 1 combo allow, huy
+    # cac future CHUA chay (khong con can test tiep, da du de xac dinh rule).
+    if matched_rule_name is None and to_fetch:
+        pool_size = live_match_concurrency or min(max_workers, len(to_fetch))
+        pool_size = max(1, pool_size)
+        with ThreadPoolExecutor(max_workers=pool_size) as executor:
+            future_to_combo = {executor.submit(_fetch_one, c): c for c in to_fetch}
+            for fut in as_completed(future_to_combo):
+                combo = future_to_combo[fut]
+                try:
+                    res = fut.result()
+                except Exception:
+                    res = None
+                if _check_one_result(combo, res):
+                    for f in future_to_combo:
+                        f.cancel()
+                    break
+
     if log_func:
         log_func(f"[Live Match] Da kiem tra {len(combinations)} to hop Source/Dest/Port qua Test Policy Match.")
     if log_func and error_messages:
@@ -611,54 +971,28 @@ def try_live_match(
                  f"(timeout/exception: {n_timeout}, firewall tu choi: {n_denied}, khac: {n_other}) "
                  f"- vi du: {error_messages[0]}")
 
-    for combo, res in zip(combinations, results):
-        s_ip, d_ip, port, proto = combo
-        if not res:
-            if log_func:
-                log_func(f"[Live Match] {s_ip}->{d_ip}:{port}/{proto} không xác nhận được "
-                          f"(xem tóm tắt lỗi phía trên) -> chuyển sang thuật toán local.")
-            return None
-        if res.get("action") != "allow":
-            if log_func:
-                log_func(f"[Live Match] {s_ip}->{d_ip}:{port}/{proto} khớp rule "
-                          f"'{res.get('rule_name')}' nhưng action='{res.get('action')}' "
-                          f"(không phải allow) -> chuyển sang thuật toán local.")
-            return None
-        matched_rules.add(res.get("rule_name"))
-
-    if not matched_rules:
+    if matched_rule_name is None:
+        _mark_skip(LIVE_MATCH_SKIP_INCONCLUSIVE,
+                   "khong co to hop nao khop action=allow tren firewall (da thu het hoac tat ca deu fail/loi)")
         return None
 
-    if len(matched_rules) > 1:
-        # Cac to hop Source/Dest/Port trong CUNG 1 dong nhung khop NHIEU rule KHAC NHAU
-        # tren firewall that (vd 1 dest IP di qua rule A, dest IP con lai trong cung dong
-        # lai di qua rule B). Truoc day code lay list(matched_rules)[0] - thu tu 1 Python
-        # set la KHONG xac dinh (dua tren hash, khong phai thu tu tim thay) - co the bao
-        # nham "FULL MATCH qua rule X" trong khi thuc te ket qua la SU KET HOP cua nhieu
-        # rule khac nhau. An toan hon: KHONG tu chon 1 rule dai dien, chuyen sang thuat
-        # toan local (bao cao chi tiet tung phan thay vi gop nham thanh 1 ket luan).
-        if log_func:
-            log_func(f"[Live Match] Cac to hop Source/Dest/Port trong dong nay khop VOI "
-                      f"NHIEU RULE KHAC NHAU tren firewall ({', '.join(sorted(matched_rules))}) "
-                      f"- khong the gop thanh 1 FULL MATCH duy nhat. Chuyen sang thuat toan "
-                      f"local de bao cao chi tiet tung phan.")
-        return None
-
-    rule_name = next(iter(matched_rules))
-    matched_rule_info = next((r for r in rule_infos if r.rule.name == rule_name), None)
+    matched_rule_info = next((r for r in rule_infos if r.rule.name == matched_rule_name), None)
 
     src_ranges = [(t['start'], t['end'], t) for t in row.source_tokens if t['kind'] != 'invalid']
     dst_ranges = [(t['start'], t['end'], t) for t in row.dest_tokens if t['kind'] != 'invalid']
 
     if matched_rule_info:
+        # build_live_match_field_report tu doi chieu TOAN BO src_ranges/dst_ranges (ca
+        # nhung IP CHUA duoc test qua API) voi dung member cua rule vua xac dinh - IP nao
+        # khop thi 'in_rule', IP nao khong khop se tu dong roi vao 'exists'/'new' NHU
+        # BINH THUONG (xem build_live_match_field_report, khong can sua gi them o do).
         src_report = build_live_match_field_report(src_ranges, matched_rule_info.source_members, idx)
         dst_report = build_live_match_field_report(dst_ranges, matched_rule_info.dest_members, idx)
         matched_rule = matched_rule_info.rule
     else:
-        # Nếu rule không tìm thấy trong file cấu hình local nhưng API báo match
         src_report = build_live_match_field_report(src_ranges, [], idx)
         dst_report = build_live_match_field_report(dst_ranges, [], idx)
-        matched_rule = SecurityRule(index=-1, name=rule_name, source=['?'], destination=['?'],
+        matched_rule = SecurityRule(index=-1, name=matched_rule_name, source=['?'], destination=['?'],
                                      service=['?'], application=['?'], action='allow', disabled=False)
 
     return RowResult(
@@ -668,7 +1002,9 @@ def try_live_match(
         source_report=src_report,
         dest_report=dst_report,
         missing_ports=[],
-        note=f"FULL MATCH trực tiếp trên Firewall qua Test Policy Match (Rule: {rule_name})"
+        note=f"XÁC NHẬN QUA FIREWALL (Rule: {matched_rule_name}) - đã tìm thấy tổ hợp khớp "
+             f"allow qua Test Policy Match, dùng LOCAL đối chiếu tĩnh để xác định chính xác "
+             f"phần Source/Dest còn thiếu (xem cột Source/Dest)."
     )
 
 
@@ -846,31 +1182,45 @@ def _scan_all_tiers(rule_infos: List[RuleInfo], src_ranges, dst_ranges, ports,
         # tinh lai CHINH XAC cung 4 gia tri nay cho CUNG 1 rule - gop lai o day la
         # phan tiet kiem CPU dang ke nhat. ----
         port_ok = _service_ok_for_match(ri.service, ports)
-        dst_covered_cnt = sum(1 for (s, e, _t) in dst_ranges if ri.dest.covers_range_wide(s, e))
-        src_covered_cnt = sum(1 for (s, e, _t) in src_ranges if ri.source.covers_range_wide(s, e))
+        dst_covered_cnt = sum(1 for (s, e, _t) in dst_ranges if ri.dest.covers_input_wide(s, e))
+        src_covered_cnt = sum(1 for (s, e, _t) in src_ranges if ri.source.covers_input_wide(s, e))
         dest_full = bool(n_dst) and dst_covered_cnt == n_dst
         source_full = bool(n_src) and src_covered_cnt == n_src
 
+        # B1 (exact qua 1 member rieng le): field co NHIEU object nhung 1 member
+        # trong do khop tuyet doi 1:1 voi request (vd Notify-GR-SRV dung 4/4 IP
+        # trong field Dest 14 dia chi cua rule 1264) van duoc coi la exact-scope
+        # that su - tranh false-negative cua _is_exactly_scoped() (xet tong gop
+        # ca field). Khi _exact_member_scope tra None, hanh vi y het truoc day.
+        dest_member_scope = _exact_member_scope(ri.dest_members, dst_ranges)
+        source_member_scope = _exact_member_scope(ri.source_members, src_ranges)
+        dest_exact_ok = _is_exactly_scoped(ri.dest, dst_ranges) or dest_member_scope is not None
+        source_exact_ok = _is_exactly_scoped(ri.source, src_ranges) or source_member_scope is not None
+
         # ---- TOP2 candidacy (dieu kien copy nguyen van vong lap TOP2 ban goc) ----
-        if port_ok and dest_full and _is_exactly_scoped(ri.dest, dst_ranges):
-            top2.append((src_covered_cnt, ri))
+        if port_ok and dest_full and dest_exact_ok:
+            top2.append((src_covered_cnt, ri, dest_member_scope))
         # ---- TOP3 candidacy (dieu kien copy nguyen van vong lap TOP3 ban goc) ----
-        if port_ok and source_full and _is_exactly_scoped(ri.source, src_ranges):
-            top3.append((dst_covered_cnt, ri))
+        if port_ok and source_full and source_exact_ok:
+            top3.append((dst_covered_cnt, ri, source_member_scope))
 
         # ---- near_top2/near_top3/generic (dieu kien copy nguyen van tu
         # _find_nearest_candidate_rule ban goc, ke ca thu tu if/continue) ----
         if both_any:
             continue
-        if port_ok and dest_full and not ri.dest.is_any and not _is_exactly_scoped(ri.dest, dst_ranges):
+        if port_ok and dest_full and not ri.dest.is_any and not dest_exact_ok:
             frac = src_covered_cnt / n_src if src_ranges else 0
             missing_zone_cnt = len(_missing_zones(src_ranges, ri.rule.from_zones, zone_lookup))
-            near_top2.append((ri.dest.total_address_count(), missing_zone_cnt, -frac, ri))
+            src_fully_covered_wide = bool(src_ranges) and src_covered_cnt == n_src
+            near_top2.append((0 if src_fully_covered_wide else 1,
+                               ri.source.total_address_count(), missing_zone_cnt, -frac, ri))
             continue
-        if port_ok and source_full and not ri.source.is_any and not _is_exactly_scoped(ri.source, src_ranges):
+        if port_ok and source_full and not ri.source.is_any and not source_exact_ok:
             frac = dst_covered_cnt / n_dst if dst_ranges else 0
             missing_zone_cnt = len(_missing_zones(dst_ranges, ri.rule.to_zones, zone_lookup))
-            near_top3.append((ri.source.total_address_count(), missing_zone_cnt, -frac, ri))
+            dst_fully_covered_wide = bool(dst_ranges) and dst_covered_cnt == n_dst
+            near_top3.append((0 if dst_fully_covered_wide else 1,
+                               ri.dest.total_address_count(), missing_zone_cnt, -frac, ri))
             continue
         if dst_covered_cnt == 0 and src_covered_cnt == 0:
             continue
@@ -901,12 +1251,12 @@ def _select_nearest_from_scan(scan: dict) -> Optional[Tuple[RuleInfo, str]]:
     near_top3 = scan["near_top3"]
     generic = scan["generic"]
     if near_top2:
-        near_top2.sort(key=lambda x: (x[0], x[1], x[2]))
-        _sz, _zc, _nf, ri = near_top2[0]
+        near_top2.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
+        _fc, _sz, _zc, _nf, ri = near_top2[0]
         return (ri, 'near_top2')
     if near_top3:
-        near_top3.sort(key=lambda x: (x[0], x[1], x[2]))
-        _sz, _zc, _nf, ri = near_top3[0]
+        near_top3.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
+        _fc, _sz, _zc, _nf, ri = near_top3[0]
         return (ri, 'near_top3')
     if generic:
         generic.sort(key=lambda x: -x[0])
@@ -969,8 +1319,8 @@ def _describe_nearest_rule(ri: RuleInfo, src_ranges, dst_ranges, ports) -> str:
     _find_nearest_candidate_rule - dung hien thi truc tiep trong cot 'Rule Lien Quan
     (TOP4)' cua file Excel xuat ra, KHONG dung de tu dong ap dung/bo sung gi ca (chi
     la thong tin tham khao cho admin quyet dinh)."""
-    dst_missing = [t['display'] for (s, e, t) in dst_ranges if not ri.dest.covers_range_wide(s, e)]
-    src_missing = [t['display'] for (s, e, t) in src_ranges if not ri.source.covers_range_wide(s, e)]
+    dst_missing = [t['display'] for (s, e, t) in dst_ranges if not ri.dest.covers_input_wide(s, e)]
+    src_missing = [t['display'] for (s, e, t) in src_ranges if not ri.source.covers_input_wide(s, e)]
     port_ok = _service_ok_for_match(ri.service, ports)
 
     dst_covered = len(dst_ranges) - len(dst_missing)
@@ -999,28 +1349,68 @@ def classify_row(
     max_workers: int = 30,
     log_func=None,
     zone_lookup: Optional[List[Tuple[int, int, int, str]]] = None,
+    max_combos: int = 300,
+    max_port_span: int = 50,
+    live_match_concurrency: Optional[int] = None,
+    live_match_semaphore: Optional[Any] = None,
+    combo_cache: Optional[dict] = None,
     target_serial: Optional[str] = None,
 ) -> RowResult:
     src_ranges = [(t['start'], t['end'], t) for t in row.source_tokens if t['kind'] != 'invalid']
     dst_ranges = [(t['start'], t['end'], t) for t in row.dest_tokens if t['kind'] != 'invalid']
     ports = row.port_tokens
 
-    if not src_ranges or not dst_ranges or not ports:
-        return RowResult(row, 'INVALID', None, note='Dữ liệu IP/Port không hợp lệ.')
+    # SUA LOI (10/2026): giu lai cac token KHONG parse duoc de bao cao tuong minh,
+    # thay vi loai bo am tham nhu truoc (xem RowResult.unparsed_source/_dest).
+    bad_src = [t['display'] or t['raw'] for t in row.source_tokens if t['kind'] == 'invalid']
+    bad_dst = [t['display'] or t['raw'] for t in row.dest_tokens if t['kind'] == 'invalid']
 
-    # ƯU TIÊN BƯỚC 1: Test Policy Match - BAN PANORAMA chi chay khi co Target Firewall
-    # (0.5); thieu target -> LIVE_MATCH tu bo qua im lang, roi thang xuong local.
+    if not src_ranges or not dst_ranges or not ports:
+        note = 'Dữ liệu IP/Port không hợp lệ.'
+        bad_all = bad_src + bad_dst
+        if bad_all:
+            note += ' Không đọc được: ' + ', '.join(bad_all[:6])
+            if len(bad_all) > 6:
+                note += f" (+{len(bad_all) - 6} giá trị khác)"
+        return RowResult(row, 'INVALID', None, note=note,
+                          unparsed_source=bad_src, unparsed_dest=bad_dst)
+
+    # ƯU TIÊN BƯỚC 1: Dùng tính năng Test Policy Match để check trực tiếp trên thiết bị trước
+    # SUA LOI (09/2026 - minh bach Live Match): neu try_live_match() khong hoan tat
+    # (vuot gioi han quy mo / goi API nhung khong ket luan duoc), LUU LAI ly do de
+    # gan vao RowResult LOCAL cuoi cung - admin nhin Excel biet ngay Live Match co
+    # duoc thu hay khong. CHI set khi Live Match DA DUOC BAT (co mgmt_ip + api_key)
+    # - khong hien caveat gay nhieu cho case chua bat tu dau.
+    live_skip_reason: Optional[str] = None
+    live_skip_detail: Optional[str] = None
+    # BAN PANORAMA (0.5): them dieu kien tien quyet `target_serial` - thieu Target
+    # Firewall thi tier LIVE_MATCH tu bo qua IM LANG (khong set live_skip_reason vi
+    # day khong phai "da thu Live Match nhung khong ket luan duoc").
     if mgmt_ip and api_key and target_serial:
+        skip_info: dict = {}
         live_res = try_live_match(row, mgmt_ip, api_key, vsys, rule_infos, idx,
-                                   max_workers=max_workers, log_func=log_func,
+                                   max_combos=max_combos, max_workers=max_workers,
+                                   log_func=log_func, max_port_span=max_port_span,
+                                   skip_info=skip_info,
+                                   live_match_concurrency=live_match_concurrency,
+                                   live_match_semaphore=live_match_semaphore,
+                                   combo_cache=combo_cache,
                                    target_serial=target_serial)
         if live_res:
+            live_res.unparsed_source = bad_src
+            live_res.unparsed_dest = bad_dst
             return live_res
+        if skip_info.get('reason'):
+            live_skip_reason = skip_info['reason']
+            live_skip_detail = skip_info.get('detail')
 
     # BƯỚC 2: Kiểm tra Same Subnet
     if _check_same_subnet(src_ranges, dst_ranges, same_subnet_prefix):
         return RowResult(row, 'SAME_SUBNET', None,
-                          note=f'Source và Dest cùng nằm trong 1 subnet /{same_subnet_prefix}.')
+                          note=f'Source và Dest cùng nằm trong 1 subnet /{same_subnet_prefix}.',
+                          live_match_skip_reason=live_skip_reason,
+                          live_match_skip_detail=live_skip_detail,
+                          unparsed_source=bad_src, unparsed_dest=bad_dst)
 
     # BƯỚC 3: Nếu kết nối CHƯA tồn tại đầy đủ trên thiết bị -> Nhảy sang các logic phân tích offline
     #
@@ -1043,7 +1433,10 @@ def classify_row(
         shadow = _find_shadowing_rule(rule_infos, ri, src_ranges, dst_ranges, ports)
         return RowResult(row, 'TOP1', ri.rule, src_report, dst_report,
                           shadow_warning=_shadow_warning_text(shadow),
-                          zone_warning=_compute_zone_warning(ri.rule, src_ranges, dst_ranges, zone_lookup))
+                          zone_warning=_compute_zone_warning(ri.rule, src_ranges, dst_ranges, zone_lookup),
+                          live_match_skip_reason=live_skip_reason,
+                          live_match_skip_detail=live_skip_detail,
+                          unparsed_source=bad_src, unparsed_dest=bad_dst)
 
     if scan["top1_1_match"] is not None:
         ri = scan["top1_1_match"]
@@ -1053,7 +1446,10 @@ def classify_row(
         shadow = _find_shadowing_rule(rule_infos, ri, src_ranges, dst_ranges, ports)
         return RowResult(row, 'TOP1.1', ri.rule, src_report, dst_report, missing_ports=missing_ports,
                           shadow_warning=_shadow_warning_text(shadow),
-                          zone_warning=_compute_zone_warning(ri.rule, src_ranges, dst_ranges, zone_lookup))
+                          zone_warning=_compute_zone_warning(ri.rule, src_ranges, dst_ranges, zone_lookup),
+                          live_match_skip_reason=live_skip_reason,
+                          live_match_skip_detail=live_skip_detail,
+                          unparsed_source=bad_src, unparsed_dest=bad_dst)
 
     top2 = scan["top2"]
     if top2:
@@ -1062,28 +1458,122 @@ def classify_row(
         # dest la group rong/catch-all (vd 'SOA-EMS') dung lam candidate, BAT KE rule
         # catch-all do co the cover duoc nhieu Source hon. Chi khi 2 rule co Dest scope
         # bang nhau (hoa diem) moi xet tiep den so Source duoc cover nhieu hon.
-        top2.sort(key=lambda x: (_addr_scope_size(x[1].dest), -x[0]))
-        _cnt, best = top2[0]
+        # B1: rule vao TOP2 nho 1 member khop tuyet doi rieng le (x[2] is not None)
+        # dung scope RIENG member do (nho, cong bang) thay vi tong ca field.
+        top2.sort(key=lambda x: (
+            x[2] if x[2] is not None else _addr_scope_size(x[1].dest), -x[0]))
+        _cnt, best, _scope = top2[0]
+        # UU TIEN CHI PHI BO SUNG (so sanh voi near_top2 tot nhat da co san trong
+        # scan, KHONG quet lai): TOP2 "exact-scope nhung ton kem" (can ADD nhieu
+        # Source IP) thua near_top2 "chi can ADD it Source IP hon han" - dung
+        # strict `<` de khi bang chi phi, TOP2 exact-scope van thang (uu tien an
+        # toan khi hoa). Dieu kien nhan biet tier trong _scan_all_tiers va logic
+        # sort trong _select_nearest_from_scan giu nguyen tuyet doi.
+        top2_missing_src = len(src_ranges) - _cnt
+        near_top2 = scan["near_top2"]
+        alt_ri = None
+        alt_missing_src = None
+        if near_top2:
+            near_sorted = sorted(near_top2, key=lambda x: (x[0], x[1], x[2], x[3]))
+            _fc, _sz, _zc, _nf, cand_ri = near_sorted[0]
+            cand_covered = sum(1 for (s, e, _t) in src_ranges if cand_ri.source.covers_input_wide(s, e))
+            alt_ri = cand_ri
+            alt_missing_src = len(src_ranges) - cand_covered
+        if alt_ri is not None and alt_missing_src < top2_missing_src:
+            # Ung vien near_top2 yeu cau bo sung IT Source hon han TOP2 "exact
+            # scope" -> dung luon near_top2 lam ket qua chinh (tier 'TOP4',
+            # near_kind='near_top2'), y het nhanh near_match thuong sinh ra o
+            # cuoi classify_row - build lai report cho DUNG alt_ri, KHONG dung
+            # report cua `best` (rule TOP2 cu) nua. Vẫn giữ 1 dòng ghi chú tên
+            # rule TOP2 "exact scope" bị bỏ qua để minh bạch (không phải log,
+            # chỉ 1 dòng ngắn).
+            src_report = build_field_report(src_ranges, [], idx, wide=True)
+            dst_report = build_field_report(dst_ranges, [], idx, wide=True)
+            nearest_detail = _describe_nearest_rule(alt_ri, src_ranges, dst_ranges, ports)
+            return RowResult(row, 'TOP4', None, src_report, dst_report,
+                              missing_ports=find_missing_ports(ports, ResolvedService(), idx),
+                              nearest_rule=alt_ri.rule, nearest_rule_kind='near_top2',
+                              nearest_missing_side='source', nearest_detail=nearest_detail,
+                              note=f"Bo qua TOP2 exact-scope '{best.rule.name}' vi can bo sung "
+                                   f"{top2_missing_src} Source IP, trong khi '{alt_ri.rule.name}' "
+                                   f"chi can bo sung {alt_missing_src} Source IP.",
+                              live_match_skip_reason=live_skip_reason,
+                              live_match_skip_detail=live_skip_detail,
+                          unparsed_source=bad_src, unparsed_dest=bad_dst)
         src_report = build_field_report(src_ranges, best.source_members, idx, wide=True)
         dst_report = build_field_report(dst_ranges, best.dest_members, idx, wide=True)
         shadow = _find_shadowing_rule(rule_infos, best, src_ranges, dst_ranges, ports)
+        # TOP2 chi dam bao Dest du + Port du. Neu Source (ben "gia dinh con thieu")
+        # THUC RA cung da duoc rule nay cover du 100% -> khong con gi de "+ ADD"
+        # (xem RowResult.wide_fully_covered).
+        src_all_covered = bool(src_ranges) and all(
+            best.source.covers_input_wide(s, e) for (s, e, _t) in src_ranges)
+        if src_all_covered:
+            _mark_side_fully_covered(src_report, src_ranges, best.source_members)
         return RowResult(row, 'TOP2', best.rule, src_report, dst_report,
+                          wide_fully_covered=src_all_covered,
                           shadow_warning=_shadow_warning_text(shadow),
-                          zone_warning=_compute_zone_warning(best.rule, src_ranges, dst_ranges, zone_lookup))
+                          zone_warning=_compute_zone_warning(best.rule, src_ranges, dst_ranges, zone_lookup),
+                          live_match_skip_reason=live_skip_reason,
+                          live_match_skip_detail=live_skip_detail,
+                          unparsed_source=bad_src, unparsed_dest=bad_dst)
 
     top3 = scan["top3"]
     if top3:
         # Doi xung voi TOP2: uu tien Source HEP HON TRUOC TIEN, TUYET DOI (vi o day Dest
         # da duoc bat buoc cover du roi, Source moi la phan con thieu can chon dai dien
         # chinh xac nhat) - khong con de "cover duoc nhieu Dest hon" ghi de len do cu the.
-        top3.sort(key=lambda x: (_addr_scope_size(x[1].source), -x[0]))
-        _cnt, best = top3[0]
+        # B1 (doi xung TOP2): dung scope RIENG member khop tuyet doi neu co.
+        top3.sort(key=lambda x: (
+            x[2] if x[2] is not None else _addr_scope_size(x[1].source), -x[0]))
+        _cnt, best, _scope = top3[0]
+        # Doi xung voi TOP2 o tren: TOP3 "exact-scope nhung ton kem" (can ADD
+        # nhieu Dest IP) thua near_top3 "chi can ADD it Dest IP hon han" - dung
+        # strict `<` de khi bang chi phi, TOP3 exact-scope van thang.
+        top3_missing_dst = len(dst_ranges) - _cnt
+        near_top3 = scan["near_top3"]
+        alt_ri = None
+        alt_missing_dst = None
+        if near_top3:
+            near_sorted = sorted(near_top3, key=lambda x: (x[0], x[1], x[2], x[3]))
+            _fc, _sz, _zc, _nf, cand_ri = near_sorted[0]
+            cand_covered = sum(1 for (s, e, _t) in dst_ranges if cand_ri.dest.covers_input_wide(s, e))
+            alt_ri = cand_ri
+            alt_missing_dst = len(dst_ranges) - cand_covered
+        if alt_ri is not None and alt_missing_dst < top3_missing_dst:
+            # Ung vien near_top3 yeu cau bo sung IT Dest hon han TOP3 "exact
+            # scope" -> dung luon near_top3 lam ket qua chinh (tier 'TOP4',
+            # near_kind='near_top3'), build lai report cho DUNG alt_ri. Vẫn giữ
+            # 1 dòng ghi chú tên rule TOP3 "exact scope" bị bỏ qua để minh
+            # bạch (không phải log, chỉ 1 dòng ngắn).
+            src_report = build_field_report(src_ranges, [], idx, wide=True)
+            dst_report = build_field_report(dst_ranges, [], idx, wide=True)
+            nearest_detail = _describe_nearest_rule(alt_ri, src_ranges, dst_ranges, ports)
+            return RowResult(row, 'TOP4', None, src_report, dst_report,
+                              missing_ports=find_missing_ports(ports, ResolvedService(), idx),
+                              nearest_rule=alt_ri.rule, nearest_rule_kind='near_top3',
+                              nearest_missing_side='dest', nearest_detail=nearest_detail,
+                              note=f"Bo qua TOP3 exact-scope '{best.rule.name}' vi can bo sung "
+                                   f"{top3_missing_dst} Dest IP, trong khi '{alt_ri.rule.name}' "
+                                   f"chi can bo sung {alt_missing_dst} Dest IP.",
+                              live_match_skip_reason=live_skip_reason,
+                              live_match_skip_detail=live_skip_detail,
+                          unparsed_source=bad_src, unparsed_dest=bad_dst)
         src_report = build_field_report(src_ranges, best.source_members, idx, wide=True)
         dst_report = build_field_report(dst_ranges, best.dest_members, idx, wide=True)
         shadow = _find_shadowing_rule(rule_infos, best, src_ranges, dst_ranges, ports)
+        # Doi xung TOP2: TOP3 chi dam bao Source du + Port du - kiem tra lai Dest.
+        dst_all_covered = bool(dst_ranges) and all(
+            best.dest.covers_input_wide(s, e) for (s, e, _t) in dst_ranges)
+        if dst_all_covered:
+            _mark_side_fully_covered(dst_report, dst_ranges, best.dest_members)
         return RowResult(row, 'TOP3', best.rule, src_report, dst_report,
+                          wide_fully_covered=dst_all_covered,
                           shadow_warning=_shadow_warning_text(shadow),
-                          zone_warning=_compute_zone_warning(best.rule, src_ranges, dst_ranges, zone_lookup))
+                          zone_warning=_compute_zone_warning(best.rule, src_ranges, dst_ranges, zone_lookup),
+                          live_match_skip_reason=live_skip_reason,
+                          live_match_skip_detail=live_skip_detail,
+                          unparsed_source=bad_src, unparsed_dest=bad_dst)
 
     src_report = build_field_report(src_ranges, [], idx, wide=True)
     dst_report = build_field_report(dst_ranges, [], idx, wide=True)
@@ -1097,17 +1587,51 @@ def classify_row(
     # _select_nearest_from_scan - KHONG goi _find_nearest_candidate_rule() nua (se
     # trigger quet lai LAN THU 2 toan bo rule_infos, mat het loi ich toi uu vua lam).
     nearest_rule = nearest_kind = nearest_side = nearest_detail = None
+    nearest_fully_covered = False
     nearest = _select_nearest_from_scan(scan)
     if nearest is not None:
         near_ri, near_kind = nearest
         nearest_rule = near_ri.rule
         nearest_kind = near_kind
         nearest_detail = _describe_nearest_rule(near_ri, src_ranges, dst_ranges, ports)
+        # SUA LOI (bao cao thuc te: 1 dong hien "+ ADD SOURCE" du nearest_detail da
+        # ghi ro "Source 23/23 khop" - TUC LA Source THUC TE da duoc rule nay cover
+        # DU roi, khong con gi de "them" nua). Nguyen nhan: near_top2/near_top3 chi
+        # dam bao 1 BEN (Dest cho near_top2, Source cho near_top3) da "du" (dest_full/
+        # source_full) + Port du - dieu kien nhan biet tier (o _scan_all_tiers) KHONG
+        # xet toi ben CON LAI (vd near_top2 duoc chon chi vi Dest chua qua duoc
+        # _is_exactly_scoped, HOAN TOAN khong lien quan Source) - nen ben con lai
+        # (Source cho near_top2 / Dest cho near_top3) co the THUC RA da duoc chinh
+        # rule nay cover DU roi (thuong qua 1 subnet/wide rong nhu Net_10.0.0.0/8),
+        # nhung code cu GAN CUNG nearest_side='source'/'dest' bat ke thuc te, khien
+        # nhan '+ ADD SOURCE/DEST' hien SAI cho ca truong hop ben do da khop 100%.
+        # KHONG doi dieu kien nhan biet near_top2/near_top3 trong _scan_all_tiers (theo
+        # dung nguyen tac bat buoc o docstring ham do) - CHI sua o day: tinh THEM xem
+        # ben "gia dinh thieu" co THUC SU con thieu IP nao khong truoc khi gan nhan.
         if near_kind == 'near_top2':
-            nearest_side = 'source'
+            src_all_covered = bool(src_ranges) and all(
+                near_ri.source.covers_input_wide(s, e) for (s, e, _t) in src_ranges)
+            nearest_side = None if src_all_covered else 'source'
+            # SUA LOI (09/2026 - wide_full_match): near_top2 theo dinh nghia luon co
+            # port_ok=True VA dest_full=True (dieu kien nhan biet trong _scan_all_tiers
+            # - TUYET DOI khong doi). Neu them Source (ben "gia dinh thieu") THUC RA
+            # cung da cover du het qua wide-match (nearest_side is None) thi CA HAI
+            # ben + Port deu da du, chi thieu dung dieu kien an toan exact-scope -
+            # danh dau de tang hien thi doi sang 'wide_full_match' thay vi "GAN DUNG".
+            nearest_fully_covered = (nearest_side is None)
         elif near_kind == 'near_top3':
-            nearest_side = 'dest'
+            dst_all_covered = bool(dst_ranges) and all(
+                near_ri.dest.covers_input_wide(s, e) for (s, e, _t) in dst_ranges)
+            nearest_side = None if dst_all_covered else 'dest'
+            # Doi xung voi near_top2 o tren: near_top3 luon co port_ok + source_full.
+            nearest_fully_covered = (nearest_side is None)
+        # 'generic' theo dinh nghia khong dam bao port hoac chi cover 1 phan -
+        # khong bao gio du dieu kien nay -> giu nearest_fully_covered=False.
 
     return RowResult(row, 'TOP4', None, src_report, dst_report, missing_ports=missing_ports,
                       nearest_rule=nearest_rule, nearest_rule_kind=nearest_kind,
-                      nearest_missing_side=nearest_side, nearest_detail=nearest_detail)
+                      nearest_missing_side=nearest_side, nearest_detail=nearest_detail,
+                      nearest_fully_covered=nearest_fully_covered,
+                      live_match_skip_reason=live_skip_reason,
+                      live_match_skip_detail=live_skip_detail,
+                          unparsed_source=bad_src, unparsed_dest=bad_dst)

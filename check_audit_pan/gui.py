@@ -23,7 +23,7 @@ from tkinter import ttk, filedialog, messagebox, scrolledtext
 from .core import (
     OUTPUT_DIR, LOG_PATH, setup_logger, PanApiError,
     Finding, RuleSnapshot,
-    CHECK_TYPE_LABELS, SHADOW_UNUSED,
+    CHECK_TYPE_LABELS, SHADOW_UNUSED, UNUSED_RULE_THRESHOLD_DAYS,
     format_service_entries,
 )
 from .pan_api import (
@@ -131,6 +131,14 @@ class App(ttk.Frame):
                         command=self._update_button_states).pack(side="left", padx=8, pady=4)
         ttk.Checkbutton(frm_feat, text="Overly Permissive Rules (Any)", variable=self.var_overly,
                         command=self._update_button_states).pack(side="left", padx=8, pady=4)
+
+        # Nguong UNUSED cau hinh duoc (dong bo voi ban Firewall standalone) - nhanh
+        # UNUSED cua Shadow Rules chi tinh khi co Target Firewall (0.7).
+        ttk.Label(frm_feat, text="Ngưỡng Unused (ngày):").pack(side="left", padx=(16, 2))
+        self.var_unused_threshold = tk.StringVar(value=str(UNUSED_RULE_THRESHOLD_DAYS))
+        self.ent_unused_threshold = ttk.Spinbox(frm_feat, from_=1, to=3650, width=6,
+                                                 textvariable=self.var_unused_threshold)
+        self.ent_unused_threshold.pack(side="left", padx=2, pady=4)
 
         # Khung 3 - Hanh dong
         frm_actions = ttk.LabelFrame(self.root, text="3. Hành động")
@@ -308,6 +316,14 @@ class App(ttk.Frame):
         if not types:
             messagebox.showwarning("Chưa chọn tính năng", "Vui lòng tick ít nhất 1 tính năng rà soát.")
             return
+        try:
+            unused_threshold = int(self.var_unused_threshold.get().strip())
+            if unused_threshold <= 0:
+                raise ValueError
+        except (ValueError, TypeError):
+            messagebox.showwarning("Ngưỡng không hợp lệ",
+                                   "Ngưỡng Unused (ngày) phải là số nguyên dương.")
+            return
         if self.cancel_event.is_set():
             self.cancel_event.clear()
         self._set_busy(True)
@@ -315,10 +331,12 @@ class App(ttk.Frame):
         self._target_serial = self.ent_serial.get().strip()
         self._log(f"Bắt đầu Check Device Group={dg}, tính năng: {', '.join(types)}")
         threading.Thread(target=self._check_worker,
-                         args=(dg, self._target_serial, types, self._mgmt_ip, self._api_key, self._verify_ssl),
+                         args=(dg, self._target_serial, types, self._mgmt_ip, self._api_key,
+                               self._verify_ssl, unused_threshold),
                          daemon=True).start()
 
-    def _check_worker(self, dg_name, target_serial, types, mgmt_ip, api_key, verify_ssl):
+    def _check_worker(self, dg_name, target_serial, types, mgmt_ip, api_key, verify_ssl,
+                       unused_threshold_days=UNUSED_RULE_THRESHOLD_DAYS):
         try:
             objs = parse_devicegroup_objects(self.config_root, dg_name)
             rules = assemble_security_rules(self.config_root, dg_name)
@@ -356,7 +374,10 @@ class App(ttk.Frame):
                 findings += find_overly_permissive_rules(rules)
                 self._log(f"Overly Permissive: {len([f for f in findings if f.check_type == 'overly_permissive'])} finding")
             if "shadow" in types:
-                shadow_findings = find_shadow_rules(rules, resolver, svc_resolver, hit_stats, datetime.now())
+                self._log(f"Đang audit Shadow Rules với ngưỡng Unused = {unused_threshold_days} ngày...")
+                shadow_findings = find_shadow_rules(rules, resolver, svc_resolver, hit_stats,
+                                                     datetime.now(),
+                                                     threshold_days=unused_threshold_days)
                 findings += shadow_findings
                 self._log(f"Shadow Rules: {len(shadow_findings)} finding")
 

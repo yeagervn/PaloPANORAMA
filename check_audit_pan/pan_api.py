@@ -685,39 +685,66 @@ def parse_zones(container) -> Dict[str, List[str]]:
     return out
 
 
-def resolve_template_for_serial(root, target_serial) -> Optional[ET.Element]:
-    """Best-effort: tra ve Template/Template Stack ap dung cho serial."""
-    def _find_template_entry(tname):
-        for t in root.findall(".//template/entry"):
-            if t.get('name') == tname:
-                return t
-        for ts in root.findall(".//template-stack/entry"):
-            if ts.get('name') == tname:
-                return ts
-        return None
+def resolve_templates_for_serial(root, target_serial) -> List[ET.Element]:
+    """Danh sach phan tu Template ap dung cho firewall co serial nay, theo thu tu
+    UU TIEN TANG DAN (phan tu sau de phan tu truoc khi trung).
 
-    dev_el = None
-    for d in root.findall("./devices/entry"):
-        if d.get('name') == target_serial:
-            dev_el = d
-            break
-    if dev_el is not None:
-        t_el = dev_el.find('.//template')
-        if t_el is not None and t_el.text and t_el.text.strip():
-            scope = _find_template_entry(t_el.text.strip())
-            if scope is not None:
-                return scope
-        ts_el = dev_el.find('.//template-stack')
-        if ts_el is not None and ts_el.text and ts_el.text.strip():
-            scope = _find_template_entry(ts_el.text.strip())
-            if scope is not None:
-                return scope
-        # Panorama moi: devices/<serial>/template-stack via member list
-        for ts in root.findall(".//template-stack/entry"):
-            for m in ts.findall(".//devices/member"):
-                if m.text and m.text.strip() == target_serial:
-                    return ts
-    return None
+    SUA LOI (10/2026): ban truoc tra cuu NGUOC CHIEU - no tim
+    `/config/devices/entry[@name=<serial>]` roi doc the <template> ben trong. Tren
+    Panorama nhanh `/config/devices/entry` la chinh PANORAMA (ten
+    'localhost.localdomain'), KHONG co entry theo serial firewall -> ham luon tra
+    None, nghia la tinh nang Zone KHONG BAO GIO chay. Quan he that duoc luu NGUOC
+    LAI: moi Template / Template Stack co 1 danh sach thiet bi
+        template/entry[@name=T]/devices/entry[@name=<serial>]
+        template-stack/entry[@name=S]/devices/entry[@name=<serial>]
+    nen phai QUET template/template-stack va xem serial co trong <devices> khong.
+
+    Template Stack duoc uu tien; cac template thanh vien liet ke trong
+    <templates><member>, thu tu TREN = uu tien CAO hon -> tra ve DAO NGUOC de ben
+    goi nap tuan tu thi cai uu tien cao nhat ghi de sau cung. Khong tim thay -> []
+    (tinh nang zone tu vo hieu im lang, 0.6)."""
+    if not target_serial:
+        return []
+    target_serial = target_serial.strip()
+
+    templates: Dict[str, ET.Element] = {}
+    for t_root in root.iter('template'):
+        for e in t_root.findall('entry'):
+            nm = e.get('name')
+            if nm:
+                templates.setdefault(nm, e)
+
+    def _has_device(entry) -> bool:
+        dev = entry.find('devices')
+        if dev is None:
+            return False
+        if any(d.get('name') == target_serial for d in dev.findall('entry')):
+            return True
+        # mot so ban export dung <member> thay vi <entry name=...>
+        return any(m.text and m.text.strip() == target_serial
+                   for m in dev.findall('member'))
+
+    for ts_root in root.iter('template-stack'):
+        for e in ts_root.findall('entry'):
+            if not _has_device(e):
+                continue
+            members = []
+            tpl_el = e.find('templates')
+            if tpl_el is not None:
+                members = [m.text.strip() for m in tpl_el.findall('member')
+                           if m.text and m.text.strip()]
+            out = [templates[m] for m in reversed(members) if m in templates]
+            return out or [e]
+    for nm, e in templates.items():
+        if _has_device(e):
+            return [e]
+    return []
+
+
+def resolve_template_for_serial(root, target_serial) -> Optional[ET.Element]:
+    """Tuong thich nguoc: tra ve DUY NHAT template uu tien cao nhat (hoac None)."""
+    scopes = resolve_templates_for_serial(root, target_serial)
+    return scopes[-1] if scopes else None
 
 
 # ============================================================================

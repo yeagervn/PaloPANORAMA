@@ -8,11 +8,14 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
+
 import xml.etree.ElementTree as ET
 
-from .core import fetch_panorama_config_xml, load_pan_config_from_xml_string, configure_live_match_concurrency, \
-    fetch_candidate_config_xml, parse_candidate_config, diff_candidate_config, get_panorama_devicegroups, \
-    list_devicegroups
+from .core import (fetch_panorama_config_xml, load_pan_config_from_xml_string,
+                    configure_live_match_concurrency, fetch_candidate_config_xml,
+                    parse_candidate_config, diff_candidate_config,
+                    get_panorama_devicegroups, get_panorama_devices,
+                    list_devicegroups, devicegroup_devices)
 from .resolver import GroupResolver, ServiceResolver
 from .index import build_device_index, build_zone_lookup
 from .request import parse_request_file, build_manual_request
@@ -23,19 +26,28 @@ SAME_SUBNET_PREFIX = 24
 DEFAULT_THREADS = 30
 MIN_THREADS = 20
 MAX_THREADS = 70
+# Gioi han so to hop Source x Dest x Port toi da cho Live Match (Test Policy Match)
+# tren 1 dong request - tran an toan de tranh 1 dong cuc lon lam treo tac vu hoac
+# doi qua nhieu request vao firewall that. Cau hinh duoc tu o Spinbox tren GUI
+# (mac dinh 300: voi 30 luong song song ~ 10 batch, chap nhan duoc cho tac vu nen).
+DEFAULT_MAX_COMBOS = 300
+MIN_MAX_COMBOS = 10
+MAX_MAX_COMBOS = 2000
+# Tong so API call Live Match (Test Policy Match) dong thoi TOI DA tren TOAN BO
+# luot chay - DUNG CHUNG cho moi dong qua 1 threading.Semaphore khoi tao 1 lan
+# (xem _start_check). Doc lap voi thread_count (so DONG chay song song): neu de
+# moi dong tu mo executor rieng voi max_workers=thread_count, dinh diem co the
+# len toi thread_count x thread_count request dong thoi vao CUNG 1 firewall
+# (vd 30 -> ~900), vuot xa kha nang management plane PAN-OS. Co dinh 30 la du.
+LIVE_MATCH_CONCURRENCY = 30
 
 
 class PANOSCheckerGUI(ttk.Frame):
-    """Giao dien tool CHECK RULE (BAN PANORAMA) - selenium 1 ttk.Frame de nhung duoc
-    vao ttk.Notebook cua Suite.
-
-    Thay doi so vs ban Firewall standalone:
-      - 'Management IP' -> 'Panorama IP'
-      - dropdown 'VSYS' -> dropdown 'Device Group' (populate sau Connect)
-      - them o 'Target Firewall (Serial) - tùy chọn' (0.1) - bat buoc cho Live Match
-        (0.5) va Zone awareness tu Template (0.6); thieu -> 2 tinh nang nay tu vo hieu
-        im lang.
-    """
+    """Giao dien tool CHECK RULE - dang 1 ttk.Frame de nhung duoc vao bat ky
+    container nao (vd 1 tab cua ttk.Notebook trong PaloRuleSearchSuite), thay vi
+    tu lam chu 1 cua so rieng (tk.Tk). Title/geometry cua CUA SO CHINH (neu chay
+    doc lap qua khoi __main__ ben duoi, hoac khi nhung vao Suite) do NOI GOI
+    (main.py) chiu trach nhiem - class nay khong con tu dat title/geometry nua."""
 
     def __init__(self, master=None, **kwargs):
         super().__init__(master, **kwargs)
@@ -45,10 +57,20 @@ class PANOSCheckerGUI(ttk.Frame):
         self.candidate_rule_infos = None
         self.candidate_idx = None
         self.zone_lookup = None
+        # BAN PANORAMA: thay 1 "vsys dang chon" bang Device Group dang chon + (tuy
+        # chon) serial firewall dich. `vsys_for_live` la vsys THAT tren firewall dich,
+        # chi dung cho Live Match (0.5) - Device Group KHONG thay the duoc vsys.
         self.dg_used = None
+        self.dg_list = []
+        self.dg_devices = []
+        self.vsys_for_live = "vsys1"
         self.full_config_xml = None
         self._tree_edit_entry = None
         self._log_queue = queue.Queue()
+        # Duong dan thu muc/chua file ket qua CUA LAN CHAY GAN NHAT (mode "file") -
+        # dung cho nut "Browse Output" de nguoi dung tu mo lai bang tay bat ky luc nao
+        # (khong chi luc vua chay xong tu dong mo 1 lan). None = chua co lan nao xuat
+        # file thanh cong trong phien lam viec nay.
         self.last_output_dir = None
         self.last_output_path = None
 
@@ -56,7 +78,8 @@ class PANOSCheckerGUI(ttk.Frame):
         self.after(100, self._drain_log_queue)
 
     def _build_ui(self):
-        config_frame = ttk.LabelFrame(self, text="1. Kết nối Panorama (API)", padding=10)
+        # 1. Ket noi thiet bi (dang nhap bang API Key, doc thang running-config qua API)
+        config_frame = ttk.LabelFrame(self, text="1. Kết nối PANORAMA (API)", padding=10)
         config_frame.pack(fill="x", padx=10, pady=5)
 
         ttk.Label(config_frame, text="Panorama IP:").grid(row=0, column=0, sticky="w", pady=5)
@@ -71,20 +94,34 @@ class PANOSCheckerGUI(ttk.Frame):
 
         ttk.Button(config_frame, text="Load Config", command=self._start_load_config).grid(row=1, column=2, padx=5)
 
-        mgmt_ip_entry.bind("<Return>", lambda e: self._start_load_config())
-        api_key_entry.bind("<Return>", lambda e: self._start_load_config())
-
-        # Device Group dropdown + Target Firewall (0.1)
+        # BAN PANORAMA (0.1): dropdown "VSYS" cua ban Firewall doi thanh "Device Group".
+        # Danh sach duoc nap sau khi Load Config; doi DG thi phai nap lai (object +
+        # rulebase deu phu thuoc chuoi thua ke cua DG do).
         ttk.Label(config_frame, text="Device Group:").grid(row=2, column=0, sticky="w", pady=5)
         self.dg_var = tk.StringVar()
-        self.dg_combo = ttk.Combobox(config_frame, textvariable=self.dg_var, width=40, state="readonly")
-        self.dg_combo.grid(row=2, column=1, sticky="w", padx=5)
+        self.cmb_dg = ttk.Combobox(config_frame, textvariable=self.dg_var, width=30, state="readonly")
+        self.cmb_dg.grid(row=2, column=1, sticky="w", padx=5)
+        self.cmb_dg.bind("<<ComboboxSelected>>", lambda e: self._on_dg_changed())
 
+        # BAN PANORAMA (0.1 + 0.5/0.6/0.7): Target Firewall - TUY CHON, chi bat buoc
+        # cho 3 tinh nang chay tren dataplane 1 firewall cu the (Live Match, Zone
+        # awareness, Rule Hit Count). De trong -> 3 tinh nang do tu vo hieu IM LANG.
+        # Dung Combobox (khong phai Entry) de chon tu danh sach thiet bi Panorama
+        # dang quan ly - go tay 1 ky tu sai serial thi Live Match im lang khong chay,
+        # rat kho phat hien.
         ttk.Label(config_frame, text="Target Firewall (Serial) - tùy chọn:").grid(row=3, column=0, sticky="w")
         self.target_serial_var = tk.StringVar()
-        ttk.Entry(config_frame, textvariable=self.target_serial_var, width=40).grid(row=3, column=1, sticky="w", padx=5)
-        ttk.Label(config_frame, text="(Bắt buộc cho Live Match & Zone)", foreground="#666666").grid(
-            row=3, column=2, sticky="w", padx=5)
+        self.cmb_target = ttk.Combobox(config_frame, textvariable=self.target_serial_var, width=40)
+        self.cmb_target.grid(row=3, column=1, sticky="w", padx=5)
+        self.lbl_target_hint = ttk.Label(config_frame, text="(trống = bỏ qua Live Match / Zone)",
+                                          foreground="#666666")
+        self.lbl_target_hint.grid(row=3, column=2, sticky="w", padx=5)
+
+        # Cho phep nhan Enter tren 2 o Management IP / API Key de chay Load Config
+        # ngay, khong bat buoc phai click chuot vao nut - thuan tien khi go xong la
+        # bam Enter lien tay.
+        mgmt_ip_entry.bind("<Return>", lambda e: self._start_load_config())
+        api_key_entry.bind("<Return>", lambda e: self._start_load_config())
 
         # 2. Mode Request Frame
         req_frame = ttk.LabelFrame(self, text="2. File Request / Nhập tay cần kiểm tra", padding=10)
@@ -96,6 +133,7 @@ class PANOSCheckerGUI(ttk.Frame):
         ttk.Radiobutton(req_frame, text="Nhập tay trực tiếp", variable=self.input_mode_var,
                         value="manual", command=self._toggle_mode).grid(row=0, column=1, sticky="w")
 
+        # File Sub-frame
         self.file_subframe = ttk.Frame(req_frame)
         self.file_subframe.grid(row=1, column=0, columnspan=3, sticky="we", pady=5)
         ttk.Label(self.file_subframe, text="File Request:").pack(side="left")
@@ -103,8 +141,13 @@ class PANOSCheckerGUI(ttk.Frame):
         req_file_entry = ttk.Entry(self.file_subframe, textvariable=self.req_file_var, width=50)
         req_file_entry.pack(side="left", padx=5)
         ttk.Button(self.file_subframe, text="Browse...", command=self._browse_req_file).pack(side="left")
+
+        # Nhan Enter ngay tren o File Request (vd sau khi Browse chon xong file, o nay
+        # dang focus) de chay Check luon, khong bat buoc phai click chuot xuong nut
+        # ben duoi.
         req_file_entry.bind("<Return>", lambda e: self._start_check())
 
+        # Manual Input Sub-frame (Treeview co the sua truc tiep tung o)
         self.manual_subframe = ttk.Frame(req_frame)
         columns = ("src", "dst", "port")
         self.tree = ttk.Treeview(self.manual_subframe, columns=columns, show="headings", height=8)
@@ -127,6 +170,7 @@ class PANOSCheckerGUI(ttk.Frame):
 
         self._toggle_mode()
 
+        # 3. Execution Control & Log Output
         exec_frame = ttk.Frame(self, padding=10)
         exec_frame.pack(fill="both", expand=True, padx=10, pady=5)
 
@@ -142,6 +186,23 @@ class PANOSCheckerGUI(ttk.Frame):
         ttk.Label(run_bar, text=f"({MIN_THREADS}-{MAX_THREADS}, mặc định {DEFAULT_THREADS})",
                   foreground="#666666").pack(side="left")
 
+        # SUA LOI (09/2026 - minh bach Live Match): nguong max_combos truoc day
+        # hardcode 50 trong matcher, khong cach nao chinh tu giao dien - request
+        # vai chuc Source x vai Dest (vd 23x5=115 combo) luon bi bo qua Live Match
+        # ngay lap tuc. O Spinbox nay (cung pattern voi thread_count) cho phep
+        # admin chinh tay, truyen xuong classify_row -> try_live_match.
+        ttk.Label(run_bar, text="   Giới hạn tổ hợp Live Match:").pack(side="left")
+        self.max_combos_var = tk.IntVar(value=DEFAULT_MAX_COMBOS)
+        ttk.Spinbox(run_bar, from_=MIN_MAX_COMBOS, to=MAX_MAX_COMBOS,
+                    textvariable=self.max_combos_var,
+                    width=6, wrap=False).pack(side="left", padx=(0, 5))
+        ttk.Label(run_bar, text=f"({MIN_MAX_COMBOS}-{MAX_MAX_COMBOS}, mặc định {DEFAULT_MAX_COMBOS})",
+                  foreground="#666666").pack(side="left")
+
+        # Nut mo lai file/thu muc ket qua CUA LAN CHAY GAN NHAT BANG TAY - bo sung
+        # them cho co che tu dong mo thu muc ngay sau khi chay xong (vd nguoi dung lo
+        # dong cua so do, hoac muon mo lai sau mot luc). Vo hieu hoa (disabled) cho
+        # toi khi co it nhat 1 lan xuat file Excel thanh cong trong phien lam viec nay.
         self.browse_output_btn = ttk.Button(run_bar, text="Browse Output...",
                                              command=self._browse_output, state="disabled")
         self.browse_output_btn.pack(side="left", padx=(10, 0))
@@ -151,9 +212,15 @@ class PANOSCheckerGUI(ttk.Frame):
         self.log_text.pack(fill="both", expand=True)
 
     def _log(self, msg: str):
+        """An toan goi tu bat ky thread nao: chi day vao queue, khong dung truc tiep
+        vao Tk widget (Tkinter khong thread-safe). Main thread se rut ra va ghi that
+        theo lo trong _drain_log_queue()."""
         self._log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n")
 
     def _drain_log_queue(self):
+        """Chay tren main thread (qua self.after) - rut het cac dong log dang cho trong
+        queue va ghi 1 lan vao widget, thay vi tung dong rieng le -> giam so lan thao tac
+        widget khi log den don dap tu nhieu worker thread cung luc."""
         pending = []
         try:
             while True:
@@ -181,19 +248,28 @@ class PANOSCheckerGUI(ttk.Frame):
             self.req_file_var.set(path)
 
     def _open_path(self, path: str):
+        """Mo 1 file/thu muc bang ung dung mac dinh cua OS - dung CHUNG cho 2 truong
+        hop: (1) tu dong mo thu muc chua file ket qua ngay sau khi xuat xong, va (2)
+        nut 'Browse Output' de nguoi dung tu mo lai bang tay bat ky luc nao."""
         if os.name == 'nt':
             os.startfile(path)
         else:
             subprocess.Popen(['open' if sys.platform == 'darwin' else 'xdg-open', path])
 
     def _browse_output(self):
+        """Mo lai THU MUC chua file ket qua CUA LAN CHAY GAN NHAT (mode 'file') bang
+        tay - danh cho truong hop nguoi dung da lo dong cua so tu dong mo truoc do,
+        hoac muon mo lai sau mot luc lam viec khac. Neu chua co lan nao xuat file
+        thanh cong trong phien lam viec nay, nut nay dang o trang thai disabled nen
+        khong the bam toi (xem _build_ui/_start_check)."""
         if not self.last_output_dir or not os.path.exists(self.last_output_dir):
             messagebox.showinfo("Thông báo", "Chưa có file kết quả nào trong phiên làm việc này - "
                                                "vui lòng bấm 'Check' trước.")
             return
         self._open_path(self.last_output_dir)
 
-    # ---- Treeview ----
+    # ---- Treeview: them dong trong + cho phep sua truc tiep tung o ----
+
     def _add_manual_row(self):
         self.tree.insert("", "end", values=("", "", ""))
 
@@ -208,6 +284,7 @@ class PANOSCheckerGUI(ttk.Frame):
             self.tree.delete(item)
 
     def _commit_tree_edit(self):
+        """Neu dang co 1 o duoc edit dang mo, luu gia tri lai truoc khi thao tac khac."""
         if self._tree_edit_entry is not None:
             try:
                 self._tree_edit_entry.event_generate("<Return>")
@@ -216,13 +293,15 @@ class PANOSCheckerGUI(ttk.Frame):
 
     def _on_tree_double_click(self, event):
         self._commit_tree_edit()
+
         region = self.tree.identify("region", event.x, event.y)
         if region != "cell":
             return
         row_id = self.tree.identify_row(event.y)
-        col_id = self.tree.identify_column(event.x)
+        col_id = self.tree.identify_column(event.x)  # vd: '#1', '#2', '#3'
         if not row_id or not col_id:
             return
+
         col_index = int(col_id.replace("#", "")) - 1
         col_name = self.tree["columns"][col_index]
         bbox = self.tree.bbox(row_id, col_id)
@@ -230,6 +309,7 @@ class PANOSCheckerGUI(ttk.Frame):
             return
         x, y, w, h = bbox
         current_value = self.tree.set(row_id, col_name)
+
         entry = ttk.Entry(self.tree)
         entry.place(x=x, y=y, width=w, height=h)
         entry.insert(0, current_value)
@@ -253,34 +333,88 @@ class PANOSCheckerGUI(ttk.Frame):
         entry.bind("<FocusOut>", _save)
         entry.bind("<Escape>", _cancel)
 
-    # ---- Load config (Panorama) ----
+    # ---- Load cau hinh: dang nhap bang API Key, doc thang running-config qua API ----
+
+    @staticmethod
+    def _normalize_serial(raw: str) -> str:
+        """O Target Firewall la Combobox co the hien 'SERIAL  (hostname)' - lay lai
+        dung phan serial truoc dau cach (nguoi dung van go tay thuan serial duoc)."""
+        return (raw or '').strip().split()[0] if (raw or '').strip() else ''
+
+    def _detect_vsys_for_target(self, root_el, target_serial) -> str:
+        """0.5: `test security-policy-match` can vsys THAT tren chinh firewall dich -
+        Device Group KHONG anh xa 1-1 sang vsys. Panorama luu vsys cua tung thiet bi
+        o /config/devices/entry[@name=<serial>]/vsys/entry. Khong suy ra duoc -> dung
+        'vsys1' (mac dinh pho bien nhat), dung tinh than "khong doan bua nhung van
+        chay duoc" cua ban goc."""
+        if not target_serial or root_el is None:
+            return "vsys1"
+        try:
+            for dev in root_el.findall("./devices/entry"):
+                if dev.get('name') != target_serial:
+                    continue
+                v = dev.find("vsys/entry")
+                if v is not None and v.get('name'):
+                    return v.get('name')
+            # Panorama khong luu vsys cua thiet bi -> thu doan tu template cua no
+            for dev in root_el.iter('devices'):
+                for e in dev.findall('entry'):
+                    if e.get('name') == target_serial:
+                        v = e.find("vsys/entry")
+                        if v is not None and v.get('name'):
+                            return v.get('name')
+        except Exception:
+            pass
+        return "vsys1"
+
+    def _on_dg_changed(self):
+        """Doi Device Group -> PHAI nap lai toan bo (object nap theo chuoi thua ke cua
+        DG do, rulebase lap rap theo chinh DG do) - khong the tai su dung cfg cu."""
+        if self.full_config_xml:
+            self._log(f"Đã đổi Device Group sang '{self.dg_var.get()}' - đang nạp lại cấu hình...")
+            self._start_load_config()
+
     def _start_load_config(self):
         mgmt_ip = self.mgmt_ip_var.get().strip()
         api_key = self.api_key_var.get().strip()
         if not mgmt_ip or not api_key:
             messagebox.showerror("Lỗi", "Vui lòng nhập đầy đủ Panorama IP và API Key.")
             return
+        dg_wanted = self.dg_var.get().strip() or None
+        target_serial = self._normalize_serial(self.target_serial_var.get()) or None
 
         def _worker():
-            self._log(f"Đang đăng nhập và đọc running-config từ Panorama {mgmt_ip} qua API...")
+            self._log(f"Đang đăng nhập và đọc config từ PANORAMA {mgmt_ip} qua API...")
             try:
                 xml_text = fetch_panorama_config_xml(mgmt_ip, api_key)
                 self.full_config_xml = xml_text
-                root = ET.fromstring(xml_text)
-                dg_list = list_devicegroups(root)
-                if not dg_list:
-                    # Fallback: thu lay tu op command
-                    try:
-                        dg_list = get_panorama_devicegroups(mgmt_ip, api_key)
-                    except Exception:
-                        dg_list = []
-                if not dg_list:
-                    raise RuntimeError("Không tìm thấy Device Group nào trong cấu hình Panorama.")
 
-                # Populate dropdown (chay tren main thread)
-                self.after(0, lambda: self._populate_dg(dg_list))
-                dg_name = self.dg_var.get().strip() or dg_list[0]
-                target_serial = self.target_serial_var.get().strip() or None
+                # 0.1: danh sach Device Group - uu tien op-command, fallback doc thang
+                # tu config (duong tin cay hon, luon co san vi vua tai ca cay config).
+                root_el = ET.fromstring(xml_text)
+                dg_list = list_devicegroups(root_el)
+                try:
+                    api_dgs = get_panorama_devicegroups(mgmt_ip, api_key)
+                    for nm in api_dgs:
+                        if nm not in dg_list:
+                            dg_list.append(nm)
+                except Exception:
+                    pass
+                if not dg_list:
+                    raise RuntimeError(
+                        "Không tìm thấy Device Group nào trong cấu hình Panorama. "
+                        "Kiểm tra lại API Key có quyền đọc toàn bộ /config hay không.")
+                self.dg_list = dg_list
+                dg_name = dg_wanted if dg_wanted in dg_list else dg_list[0]
+
+                # 0.1: danh sach serial de chon Target Firewall (best-effort)
+                try:
+                    devs = get_panorama_devices(mgmt_ip, api_key)
+                    if devs:
+                        self.cmb_target['values'] = [
+                            f"{sn}" + (f"  ({hn})" if hn else "") for sn, hn in devs]
+                except Exception:
+                    pass
 
                 cfg = load_pan_config_from_xml_string(xml_text, dg_name, target_serial)
 
@@ -290,26 +424,35 @@ class PANOSCheckerGUI(ttk.Frame):
                 rule_infos = build_rule_infos(cfg['rules'], group_resolver, svc_resolver)
 
                 zone_lookup = []
-                if target_serial:
-                    try:
-                        zone_lookup = build_zone_lookup(cfg.get('interface_subnets', []), cfg.get('zones', {}))
-                        if zone_lookup:
-                            self._log(f"Đã dựng bảng tra cứu Zone từ Template (Target: {target_serial}), "
-                                      f"{len(zone_lookup)} subnet.")
-                        else:
-                            self._log("Không dựng được bảng Zone từ Template của Target "
-                                      "(không tìm thấy Template/Interface/Zone) - tính năng thiếu Zone "
-                                      "sẽ không hoạt động (không ảnh hưởng tính năng khác).")
-                    except Exception as e:
-                        self._log(f"Cảnh báo: không dựng được bảng Zone ({e}) - bỏ qua tính năng này.")
-                else:
-                    self._log("Chưa nhập Target Firewall - tính năng Live Match và Zone bị tắt (im lặng).")
+                try:
+                    zone_lookup = build_zone_lookup(cfg.get('interface_subnets', []), cfg.get('zones', {}))
+                    if zone_lookup:
+                        self._log(f"Đã dựng bảng tra cứu Zone từ {len(zone_lookup)} subnet interface trên thiết bị.")
+                    else:
+                        self._log("Không tìm thấy dữ liệu Interface/Zone phù hợp - tính năng cảnh báo "
+                                   "thiếu Zone sẽ không hoạt động cho lần chạy này (không ảnh hưởng các "
+                                   "tính năng khác).")
+                except Exception as e:
+                    self._log(f"Cảnh báo: không dựng được bảng tra cứu Zone ({e}) - bỏ qua tính năng này, "
+                               f"vẫn tiếp tục bình thường với các tính năng khác.")
 
+                # Doc CANDIDATE config (rule/object dang cho commit) - HOAN TOAN TACH
+                # BIET, tu resolver/idx/rule_infos rieng, KHONG dung chung voi bo running
+                # o tren (xem core.parse_candidate_config - ly do tach biet nghiem ngat
+                # de tranh 1 group dang duoc rule running dung bi tinh sai la da cover
+                # them member moi tren candidate). Neu buoc nay loi vi ly do gi, bo qua
+                # va van tiep tuc voi du lieu running-config nhu truoc gio.
                 candidate_rule_infos = []
                 candidate_idx = None
                 try:
                     cand_xml = fetch_candidate_config_xml(mgmt_ip, api_key)
-                    cand_cfg = parse_candidate_config(cand_xml, dg_name, target_serial)
+                    cand_cfg = parse_candidate_config(cand_xml, cfg.get('devicegroup_used'))
+                    # QUAN TRONG: candidate API tra ve TOAN BO cay cau hinh (khong phai
+                    # diff) - phai loc xuong CHI con phan THAT SU moi/thay doi so voi
+                    # running, neu khong gan nhu MOI item se bi gan nham la 'candidate'
+                    # (vi trung voi rule/object von da co san tu truoc). Van dung
+                    # cand_cfg GOC (chua loc) de dung lam RESOLVER context, dam bao rule/
+                    # group moi tham chieu toi object cu KHONG doi van resolve dung.
                     diff_cfg = diff_candidate_config(cfg, cand_cfg)
                     cand_group_resolver = GroupResolver(cand_cfg['address_objects'], cand_cfg['address_groups'])
                     cand_svc_resolver = ServiceResolver(cand_cfg['service_objects'], cand_cfg['service_groups'])
@@ -317,12 +460,11 @@ class PANOSCheckerGUI(ttk.Frame):
                     candidate_rule_infos = build_rule_infos(diff_cfg['rules'], cand_group_resolver, cand_svc_resolver)
                     n_new_rules = len(diff_cfg['rules'])
                     n_new_objs = (len(diff_cfg['address_objects']) + len(diff_cfg['address_groups']) +
-                                   len(diff_cfg['service_objects']) + len(diff_cfg['service_groups']))
+                                  len(diff_cfg['service_objects']) + len(diff_cfg['service_groups']))
                     if n_new_rules or n_new_objs:
                         self._log(f"Ghi nhận {n_new_rules} rule và {n_new_objs} object/group THẬT SỰ "
                                    f"mới/thay đổi trong candidate-config (CHƯA commit) - chỉ dùng để "
-                                   f"cảnh báo tham khảo, KHÔNG dùng để kết luận traffic đã được phép. "
-                                   f"[Panorama 2 tang: Commit to Panorama -> Commit and Push (0.4)]")
+                                   f"cảnh báo tham khảo, KHÔNG dùng để kết luận traffic đã được phép.")
                 except Exception as e:
                     self._log(f"Cảnh báo: không lấy được candidate-config để đối chiếu thay đổi "
                                f"chưa commit ({e}) - vẫn tiếp tục với running-config như cũ.")
@@ -332,20 +474,42 @@ class PANOSCheckerGUI(ttk.Frame):
                 self.zone_lookup = zone_lookup
                 self.candidate_rule_infos = candidate_rule_infos
                 self.candidate_idx = candidate_idx
-                self.dg_used = dg_name
-                self._log(f"Nạp thành công {len(cfg['rules'])} rules (Device Group: {dg_name}).")
-                self._log(f"Chuỗi thừa kế Device Group: {' -> '.join(cfg.get('devicegroup_chain', []))}")
+                self.dg_used = cfg.get('devicegroup_used')
+                self.dg_devices = cfg.get('devicegroup_devices') or []
+                self.cmb_dg['values'] = dg_list
+                self.dg_var.set(self.dg_used or '')
+
+                chain = cfg.get('devicegroup_chain') or []
+                self._log("Chuỗi thừa kế Device Group (object nạp theo thứ tự này, "
+                          "DG sau đè DG trước): " + " -> ".join(chain))
+                self._log(f"Nạp thành công {len(cfg['rules'])} rule đã LẮP RÁP theo đúng thứ tự "
+                          f"PAN-OS đánh giá (Shared-PRE -> DG-chain-PRE -> DG-chain-POST -> "
+                          f"Shared-POST) cho Device Group '{self.dg_used}'.")
+
+                # 0.5/0.6: kiem tra cheo Target Firewall voi DG dang chon
+                self.vsys_for_live = self._detect_vsys_for_target(root_el, target_serial)
+                if target_serial:
+                    if self.dg_devices and target_serial not in self.dg_devices:
+                        self._log(f"CẢNH BÁO: serial '{target_serial}' KHÔNG nằm trong danh sách "
+                                  f"thiết bị của Device Group '{self.dg_used}' ({', '.join(self.dg_devices)}). "
+                                  f"Live Match vẫn chạy được nhưng rulebase bạn đang đối chiếu có thể "
+                                  f"KHÔNG phải rulebase thật của firewall đó.")
+                    tpl = cfg.get('template_used') or []
+                    if tpl:
+                        self._log(f"Zone lấy từ Template: {', '.join(tpl)} (Target {target_serial}).")
+                    else:
+                        self._log(f"Không tìm thấy Template gắn với serial '{target_serial}' - "
+                                  f"tính năng cảnh báo thiếu Zone tự vô hiệu cho lần chạy này.")
+                    self._log(f"Live Match sẽ gọi với target={target_serial}, vsys={self.vsys_for_live}.")
+                else:
+                    self._log("Không nhập Target Firewall - Live Match và cảnh báo Zone TỰ VÔ HIỆU "
+                              "(chỉ chạy thuật toán LOCAL trên config Panorama).")
                 messagebox.showinfo("Thông báo", "Đọc cấu hình từ Panorama thành công!")
             except Exception as e:
                 self._log(f"Lỗi nạp config: {e}")
                 messagebox.showerror("Lỗi", str(e))
 
         threading.Thread(target=_worker, daemon=True).start()
-
-    def _populate_dg(self, dg_list):
-        self.dg_combo['values'] = dg_list
-        if not self.dg_var.get():
-            self.dg_var.set(dg_list[0])
 
     def _start_check(self):
         self._commit_tree_edit()
@@ -357,9 +521,13 @@ class PANOSCheckerGUI(ttk.Frame):
         mode = self.input_mode_var.get()
         mgmt_ip = self.mgmt_ip_var.get().strip()
         api_key = self.api_key_var.get().strip()
-        target_serial = self.target_serial_var.get().strip() or None
         thread_count = max(MIN_THREADS, min(MAX_THREADS, self.thread_var.get() or DEFAULT_THREADS))
         configure_live_match_concurrency(thread_count)
+        # BAN PANORAMA (0.5): doc lai serial tai thoi diem bam Check (nguoi dung co the
+        # vua doi Target sau khi Load Config - Live Match dung ngay gia tri moi).
+        target_serial = self._normalize_serial(self.target_serial_var.get()) or None
+        max_combos = max(MIN_MAX_COMBOS, min(MAX_MAX_COMBOS,
+                                             self.max_combos_var.get() or DEFAULT_MAX_COMBOS))
 
         headers = []
         rows = []
@@ -382,25 +550,21 @@ class PANOSCheckerGUI(ttk.Frame):
             headers, rows = parsed.headers, parsed.rows
 
         def _worker():
-            self._log(f"Bắt đầu kiểm tra {len(rows)} kết nối (Thread: {thread_count})...")
+            self._log(f"Bắt đầu kiểm tra {len(rows)} kết nối (Thread: {thread_count}, "
+                      f"Giới hạn tổ hợp Live Match: {max_combos})...")
             results = [None] * len(rows)
-            # 0.5: xac dinh vsys that tren target firewall (best-effort), fallback vsys1
-            vsys_for_live = "vsys1"
-            if target_serial and self.full_config_xml:
-                try:
-                    _r = ET.fromstring(self.full_config_xml)
-                    for dev in _r.findall("./devices/entry"):
-                        if dev.get('name') == target_serial:
-                            v = dev.find("vsys/entry")
-                            if v is not None and v.get('name'):
-                                vsys_for_live = v.get('name')
-                                break
-                    if vsys_for_live == "vsys1":
-                        fe = _r.find(".//vsys/entry")
-                        if fe is not None and fe.get('name'):
-                            vsys_for_live = fe.get('name')
-                except Exception:
-                    pass
+            # SUA LOI (09/2026 - hieu nang Live Match): khoi tao 1 LAN DUY NHAT cho
+            # ca luot chay, dung chung cho MOI dong - KHONG tao moi moi dong:
+            # - live_match_semaphore: tran TONG so API call Live Match dong thoi
+            #   (30), ke ca khi nhieu dong chay song song (thread_count co the 70).
+            #   Trong try_live_match(), moi lan goi API that deu `with` semaphore
+            #   nay truoc - day moi la lop gioi han THUC SU (executor noi bo chi
+            #   dieu phoi + early-exit qua as_completed).
+            # - combo_cache: dedup combo TRUNG nhau giua cac dong (key
+            #   (src_ip, dst_ip, port, proto)) - ket qua 1 combo bat bien trong
+            #   1 luot chay nen tai su dung khong anh huong do chinh xac.
+            live_match_semaphore = threading.Semaphore(LIVE_MATCH_CONCURRENCY)
+            combo_cache: dict = {}
 
             def _process(item):
                 i, row = item
@@ -411,12 +575,21 @@ class PANOSCheckerGUI(ttk.Frame):
                     same_subnet_prefix=SAME_SUBNET_PREFIX,
                     mgmt_ip=mgmt_ip,
                     api_key=api_key,
-                    vsys=vsys_for_live,
+                    vsys=self.vsys_for_live,
                     max_workers=thread_count,
                     log_func=self._log,
                     zone_lookup=self.zone_lookup,
+                    max_combos=max_combos,
+                    live_match_semaphore=live_match_semaphore,
+                    combo_cache=combo_cache,
+                    # BAN PANORAMA (0.5): khong co serial -> classify_row tu bo qua
+                    # tier LIVE_MATCH, im lang, roi thang xuong thuat toan LOCAL.
                     target_serial=target_serial,
                 )
+                # Canh bao/bo sung THAM KHAO tu CANDIDATE config (rule/object chua
+                # commit) - sua truc tiep source_report/dest_report/missing_ports cua
+                # res, KHONG doi tier/action chinh dua tren running-config. Bo qua neu
+                # da la LIVE_MATCH (da xac nhan chac chan qua thiet bi that).
                 if res.tier != 'LIVE_MATCH':
                     apply_candidate_overlay(res, row, self.candidate_rule_infos, self.candidate_idx)
                 return i, res
@@ -426,24 +599,26 @@ class PANOSCheckerGUI(ttk.Frame):
                 for i, res in executor.map(_process, enumerate(rows)):
                     results[i] = res
 
+            # XỬ LÝ KẾT QUẢ THEO MODE
             if mode == "manual":
+                # NHẬP TAY: Chỉ in trực tiếp ra GUI / Log, KHÔNG sinh file output
                 self._log("=== KẾT QUẢ KIỂM TRA TRỰC TIẾP (NHẬP TAY) ===")
                 summary_lines = []
                 for i, res in enumerate(results, 1):
                     rule_nm = res.rule.name if res.rule else "Chưa có"
-                    vi_tri = res.rule.vi_tri if res.rule else ""
                     msg = f"Dòng {i}: Status [{res.tier}] | Matched Rule: {rule_nm}"
-                    if vi_tri:
-                        msg += f" ({vi_tri})"
                     if res.note:
                         msg += f" | {res.note}"
                     self._log(msg)
                     summary_lines.append(msg)
+
                 messagebox.showinfo(
                     "Kết quả Test Policy Match",
                     "Đã hoàn thành kiểm tra trực tiếp:\n\n" + "\n".join(summary_lines)
                 )
+
             else:
+                # ĐỌC FILE: Xuất file Excel và TỰ ĐỘNG MỞ THƯ MỤC
                 self._log("Đang xuất kết quả ra file Excel...")
                 out_dir = os.path.dirname(os.path.abspath(self.req_file_var.get().strip()))
                 input_base = os.path.splitext(os.path.basename(self.req_file_var.get().strip()))[0]
@@ -453,10 +628,16 @@ class PANOSCheckerGUI(ttk.Frame):
                 export_results(headers, results, out_path)
                 self._log(f"Đã xuất file thành công: {out_path}")
 
+                # Ghi lai duong dan cho nut "Browse Output" dung sau nay + bat nut do
+                # len (dang bi disabled tu dau, xem _build_ui). Thao tac config() tren
+                # widget PHAI chay tren main thread (Tkinter khong thread-safe) - dung
+                # self.after(0, ...) de day ve main thread thay vi goi truc tiep tu day
+                # (dang chay trong worker thread).
                 self.last_output_dir = out_dir
                 self.last_output_path = out_path
                 self.after(0, lambda: self.browse_output_btn.config(state="normal"))
 
+                # Tự động mở thư mục chứa file
                 self._open_path(out_dir)
 
                 messagebox.showinfo(
@@ -470,9 +651,12 @@ class PANOSCheckerGUI(ttk.Frame):
 
 
 if __name__ == "__main__":
+    # Cho phep chay/test doc lap tool CHECK RULE (khong qua Suite chinh) - tu dung
+    # 1 cua so tk.Tk() rieng lam container, giu nguyen hanh vi title/geometry nhu
+    # truoc day khi con la tk.Tk truc tiep.
     _root = tk.Tk()
-    _root.title("PAN-OS Policy & Request Matcher - CHECK RULE (Panorama)")
-    _root.geometry("980x760")
+    _root.title("PAN-OS Policy & Request Matcher - CHECK RULE (standalone)")
+    _root.geometry("900x720")
     app = PANOSCheckerGUI(_root)
     app.pack(fill="both", expand=True)
     _root.mainloop()

@@ -4,7 +4,8 @@ from dataclasses import dataclass
 from typing import List, Optional
 import openpyxl
 
-from .core import split_multi_value, parse_ip_token, parse_port_token, detect_protocol
+from .core import (split_multi_value, split_ip_tokens, parse_ip_token,
+                    parse_port_token, detect_protocol)
 
 SRC_ALIASES = {'source ip', 'src ip', 'sourceip', 'srcip', 'source', 'src'}
 DST_ALIASES = {'destination ip', 'dest ip', 'dst ip', 'destinationip', 'destip', 'dstip',
@@ -106,8 +107,8 @@ def parse_request_file(path: str) -> ParsedRequestFile:
         if col_proto is not None and col_proto < len(r) and r[col_proto]:
             row_protocol = detect_protocol(str(r[col_proto]))
 
-        source_tokens = [parse_ip_token(t) for t in split_multi_value(raw_source)]
-        dest_tokens = [parse_ip_token(t) for t in split_multi_value(raw_dest)]
+        source_tokens = [parse_ip_token(t) for t in split_ip_tokens(raw_source)]
+        dest_tokens = [parse_ip_token(t) for t in split_ip_tokens(raw_dest)]
 
         port_tokens = []
         for t in split_multi_value(raw_port):
@@ -140,8 +141,8 @@ def build_manual_request(table_rows: List[List[str]]) -> ParsedRequestFile:
         src, dst, prt = (src or '').strip(), (dst or '').strip(), (prt or '').strip()
         if not src and not dst and not prt:
             continue
-        source_tokens = [parse_ip_token(t) for t in split_multi_value(src)]
-        dest_tokens = [parse_ip_token(t) for t in split_multi_value(dst)]
+        source_tokens = [parse_ip_token(t) for t in split_ip_tokens(src)]
+        dest_tokens = [parse_ip_token(t) for t in split_ip_tokens(dst)]
         port_tokens = []
         for t in split_multi_value(prt):
             proto_hint = detect_protocol(t)

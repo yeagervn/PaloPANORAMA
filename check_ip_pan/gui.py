@@ -13,10 +13,11 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 
 from .core import APP_TITLE, OUTPUT_DIR, LOG_PATH, DEFAULT_WORKERS, setup_logger, PanApiError
-from .core import parse_ip_list_input
-from .pan_api import PanApiClient, get_devicegroup_list
+from .core import parse_ip_list_input, build_run_plan, describe_run_plan
+from .pan_api import PanApiClient, get_devicegroup_list, resolve_devicegroup_chain
 from .matching_engine import parse_log_file, run_search_pipeline, run_nat_export_pipeline
-from .excel_export import export_to_excel, export_nat_to_excel, export_nat_to_csv
+from .excel_export import (export_to_excel, export_nat_to_excel, export_nat_to_csv,
+                            export_combined_to_excel)
 
 class App(ttk.Frame):
     """Giao dien tool CHECK IP - dang 1 ttk.Frame de nhung duoc vao bat ky
@@ -52,7 +53,7 @@ class App(ttk.Frame):
     def _build_ui(self):
         pad = {"padx": 6, "pady": 4}
 
-        frm_conn = ttk.LabelFrame(self.root, text="1. Ket noi Panorama")
+        frm_conn = ttk.LabelFrame(self.root, text="1. Ket noi PANORAMA")
         frm_conn.pack(fill="x", **pad)
 
         ttk.Label(frm_conn, text="Panorama IP:").grid(row=0, column=0, sticky="w", **pad)
@@ -71,18 +72,30 @@ class App(ttk.Frame):
         ttk.Checkbutton(frm_conn, text="Kiem tra SSL Certificate",
                          variable=self.var_verify_ssl).grid(row=1, column=0, columnspan=2, sticky="w", **pad)
 
+        # BAN PANORAMA (0.1): dropdown "VSYS" doi thanh "Device Group" - pham vi moi
+        # tra cuu la Shared + chuoi DG cha-con cua DG nay (ca pre lan post-rulebase).
         ttk.Label(frm_conn, text="Device Group:").grid(row=1, column=2, sticky="e", **pad)
-        self.cmb_vsys = ttk.Combobox(frm_conn, width=18, state="readonly")
-        self.cmb_vsys.grid(row=1, column=3, sticky="w", **pad)
-
-        ttk.Label(frm_conn, text="Target Firewall (Serial) - tuy chon:").grid(row=2, column=0, sticky="w", **pad)
-        self.ent_target = ttk.Entry(frm_conn, width=28)
-        self.ent_target.grid(row=2, column=1, sticky="w", **pad)
+        self.cmb_dg = ttk.Combobox(frm_conn, width=18, state="readonly")
+        self.cmb_dg.grid(row=1, column=3, sticky="w", **pad)
+        self.cmb_dg.bind("<<ComboboxSelected>>", lambda e: self._show_dg_chain())
 
         self.btn_connect = ttk.Button(frm_conn, text="Connect", command=self._on_connect)
         self.btn_connect.grid(row=0, column=5, rowspan=2, sticky="ns", **pad)
 
-        frm_input = ttk.LabelFrame(self.root, text="2. Danh sach IP can tim (moi IP 1 dong, hoac paste truc tiep tu Excel)")
+        # BAN PANORAMA (0.1): Target Firewall - TUY CHON. Tab CHECK IP khong goi Live
+        # Match/Hit-count nen o nay chi de ghi chu vao log "ket qua dang doi chieu cho
+        # firewall nao"; de trong hoan toan binh thuong.
+        ttk.Label(frm_conn, text="Target Firewall (Serial) - tuy chon:").grid(
+            row=2, column=0, sticky="w", **pad)
+        self.ent_serial = ttk.Entry(frm_conn, width=28)
+        self.ent_serial.grid(row=2, column=1, sticky="w", **pad)
+        self.lbl_dg_chain = ttk.Label(frm_conn, text="", foreground="#555555")
+        self.lbl_dg_chain.grid(row=2, column=2, columnspan=4, sticky="w", **pad)
+
+        frm_input = ttk.LabelFrame(
+            self.root,
+            text="2. Danh sach IP can tim trong SECURITY RULE - tuy chon "
+                 "(moi IP 1 dong hoac paste tu Excel; de trong = BO QUA Check Rule)")
         frm_input.pack(fill="both", expand=False, **pad)
         self.txt_ips = scrolledtext.ScrolledText(frm_input, height=7, font=("Consolas", 10))
         self.txt_ips.pack(fill="both", expand=True, **pad)
@@ -92,10 +105,16 @@ class App(ttk.Frame):
         self.ent_logfile = ttk.Entry(frm_log)
         self.ent_logfile.grid(row=0, column=0, sticky="we", padx=6, pady=4)
         frm_log.columnconfigure(0, weight=1)
-        ttk.Button(frm_log, text="Browse...", command=self._on_browse_logfile).grid(row=0, column=1, padx=6, pady=4)
+        ttk.Button(frm_log, text="Import", command=self._on_browse_logfile).grid(row=0, column=1, padx=6, pady=4)
         ttk.Button(frm_log, text="Xoa", command=self._on_clear_logfile).grid(row=0, column=2, padx=6, pady=4)
+        # THAY DOI (10/2026 - theo yeu cau): nut "Check" rieng cua muc 3 DA DUOC GOP
+        # xuong hang nut chung o duoi muc 4 (self.btn_run) - 1 nut DUY NHAT chay ca
+        # Check Rule (muc 2+3) lan Export NAT (muc 4), tuy theo o nao duoc nhap.
+        # Nut "Open Output Folder" o day cung bo vi da co san 1 nut y het o hang do.
 
-        frm_nat = ttk.LabelFrame(self.root, text="4. Export bang NAT - tuy chon (khong bat buoc nhap muc 2/3)")
+        frm_nat = ttk.LabelFrame(
+            self.root,
+            text="4. Export bang NAT - tuy chon (de trong = BO QUA NAT, chi Check Rule)")
         frm_nat.pack(fill="x", **pad)
         ttk.Label(frm_nat, text="Export bang NAT:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
         self.var_export_nat = tk.StringVar(value="No")
@@ -115,10 +134,14 @@ class App(ttk.Frame):
         self.txt_nat_ips.grid(row=2, column=0, columnspan=5, sticky="we", padx=6, pady=(0, 4))
         frm_nat.columnconfigure(4, weight=1)
 
+        # 1 NUT DUY NHAT cho ca 2 viec (thay cho cap "Check" o muc 3 + "Export NAT"
+        # o day truoc kia): chay Check Rule neu muc 2 HOAC muc 3 co du lieu, chay
+        # Export NAT neu muc 4 duoc chon - nhap ca 2 thi chay ca 2 trong CUNG 1 luot.
         frm_actions = ttk.Frame(self.root)
         frm_actions.pack(fill="x", **pad)
-        self.btn_search = ttk.Button(frm_actions, text="Search", command=self._on_search, state="disabled")
-        self.btn_search.pack(side="left", padx=4)
+        self.btn_run = ttk.Button(frm_actions, text="Check / Export",
+                                   command=self._on_run_all, state="disabled")
+        self.btn_run.pack(side="left", padx=4)
         self.btn_cancel = ttk.Button(frm_actions, text="Cancel", command=self._on_cancel, state="disabled")
         self.btn_cancel.pack(side="left", padx=4)
         self.btn_open_output = ttk.Button(frm_actions, text="Open Output Folder", command=self._on_open_output)
@@ -128,6 +151,11 @@ class App(ttk.Frame):
         self.spn_threads = ttk.Spinbox(frm_actions, from_=20, to=50, width=5, increment=1, justify="center")
         self.spn_threads.set(min(50, max(20, DEFAULT_WORKERS)))
         self.spn_threads.pack(side="left", padx=4)
+
+        # Nhan cho biet TRUOC khi bam: luot chay nay se lam gi (cap nhat lien tuc
+        # theo noi dung muc 2/3/4) - de khong con phai doan nut nao chay cai gi.
+        self.lbl_plan = ttk.Label(frm_actions, text="", foreground="#555555")
+        self.lbl_plan.pack(side="left", padx=(12, 4))
 
         frm_progress = ttk.Frame(self.root)
         frm_progress.pack(fill="x", **pad)
@@ -140,6 +168,20 @@ class App(ttk.Frame):
         frm_log.pack(fill="both", expand=True, **pad)
         self.txt_log = scrolledtext.ScrolledText(frm_log, height=13, state="disabled", font=("Consolas", 9))
         self.txt_log.pack(fill="both", expand=True, **pad)
+
+    def _show_dg_chain(self):
+        """BAN PANORAMA (0.2): hien ngay chuoi thua ke cua Device Group dang chon
+        (Shared -> DG to tien -> ... -> DG hien tai). Day la PHAM VI THAT cua moi
+        ket qua tra cuu - rat de hieu nham la "chi trong DG nay" neu khong noi ro."""
+        try:
+            dg = self.cmb_dg.get()
+            if not dg or self.config_root is None:
+                self.lbl_dg_chain.config(text="")
+                return
+            chain, _els = resolve_devicegroup_chain(self.config_root, dg)
+            self.lbl_dg_chain.config(text="Pham vi: " + " -> ".join(chain))
+        except Exception:
+            self.lbl_dg_chain.config(text="")
 
     def _toggle_key_visibility(self):
         self.ent_apikey.config(show="" if self.var_show_key.get() else "*")
@@ -156,8 +198,47 @@ class App(ttk.Frame):
             self.lbl_nat_ips.config(
                 text="IP can highlight (tuy chon, mau XANH LA - de trong = xuat full khong highlight):")
         else:
+            # THAY DOI (10/2026): o nay khong con "BAT BUOC" theo kieu chan ca luot
+            # chay nua - de trong chi co nghia la BO QUA phan NAT (van chay Check
+            # Rule neu muc 2/3 co du lieu).
             self.lbl_nat_ips.config(
-                text="IP can tim trong bang NAT (BAT BUOC voi che do Search - moi IP 1 dong):")
+                text="IP can tim trong bang NAT (moi IP 1 dong - de trong = BO QUA NAT, chi Check Rule):")
+        self._refresh_plan_hint()
+
+    # ------------------------------------------------- lap ke hoach & validate
+    #
+    # THAY DOI (10/2026 - theo yeu cau): 1 NUT DUY NHAT (self.btn_run) chay ca
+    # Check Rule (muc 2+3) lan Export NAT (muc 4). TOAN BO luat quyet dinh nam o
+    # core.build_run_plan() (ham thuan tuy, khong tkinter, co unit test rieng o
+    # tests/test_check_ip_run_plan.py) - 2 ham duoi day CHI doc widget va hien thi.
+
+    def _collect_plan(self):
+        """Doc input tu widget roi uy quyen TOAN BO luat quyet dinh cho
+        core.build_run_plan() (ham thuan tuy, co unit test rieng - xem
+        tests/test_check_ip_run_plan.py). O day KHONG chua luat nao."""
+        return build_run_plan(
+            ip_text=self.txt_ips.get("1.0", "end"),
+            logfile_path=self.ent_logfile.get(),
+            nat_mode_full=(self.var_export_nat.get() == "Yes"),
+            nat_ip_text=self.txt_nat_ips.get("1.0", "end"),
+            nat_format=self.cmb_nat_format.get(),
+            worker_count_raw=self.spn_threads.get(),
+        )
+
+    def _refresh_plan_hint(self):
+        """Cap nhat nhan canh nut Run: luot chay sap toi se lam gi. Chi tinh lai
+        khi noi dung 3 o input thuc su doi (tranh parse lai moi 100ms khi nguoi
+        dung paste hang nghin IP)."""
+        try:
+            sig = (self.txt_ips.get("1.0", "end"), self.ent_logfile.get(),
+                   self.txt_nat_ips.get("1.0", "end"), self.var_export_nat.get())
+        except Exception:
+            return
+        if sig == getattr(self, "_plan_sig", None):
+            return
+        self._plan_sig = sig
+        plan, _errors = self._collect_plan()
+        self.lbl_plan.config(text=describe_run_plan(plan))
 
     # -------------------------------------------------------------- queue
     def _log(self, msg: str):
@@ -185,12 +266,13 @@ class App(ttk.Frame):
                     messagebox.showerror("Loi", payload)
                 elif kind == "done_connect":
                     self._finish_connect(payload)
-                elif kind == "done_search":
-                    self._finish_search(payload)
+                elif kind == "done_run_all":
+                    self._finish_run_all(payload)
                 elif kind == "enable_ui":
                     self._set_busy(False)
         except queue.Empty:
             pass
+        self._refresh_plan_hint()
         self.root.after(100, self._poll_queue)
 
     # ------------------------------------------------------------- connect
@@ -214,12 +296,15 @@ class App(ttk.Frame):
             hostname = client.test_connection()
             self._log(f"Connect OK (Panorama hostname: {hostname})")
 
-            self._log("Dang tai FULL running-config Panorama (co the mat vai giay tuy so luong object)...")
+            self._log("Dang tai FULL running-config PANORAMA (co the mat vai giay tuy so luong object)...")
             config_root = client.fetch_running_config()
             dg_list = get_devicegroup_list(config_root)
             if not dg_list:
-                dg_list = ["shared"]
-            self._log(f"Doc danh sach Device Group OK: {', '.join(dg_list)}")
+                raise PanApiError(
+                    "No device-group found",
+                    "Khong tim thay Device Group nao trong cau hinh Panorama. Kiem tra lai "
+                    "API Key co quyen doc toan bo /config hay khong.")
+            self._log(f"Doc danh sach Device Group OK ({len(dg_list)}): {', '.join(dg_list)}")
 
             registered_ip_tags = client.fetch_registered_ip()
             if registered_ip_tags:
@@ -240,181 +325,221 @@ class App(ttk.Frame):
         finally:
             self.msg_queue.put(("enable_ui", None))
 
-    def _finish_connect(self, vsys_list):
-        self.cmb_vsys["values"] = vsys_list
-        self.cmb_vsys.current(0)
-        self.btn_search.config(state="normal")
-        self.lbl_progress.config(text="Connect thanh cong. San sang Search.")
+    def _finish_connect(self, dg_list):
+        self.cmb_dg["values"] = dg_list
+        self.cmb_dg.current(0)
+        self._show_dg_chain()
+        self.btn_run.config(state="normal")
+        self.lbl_progress.config(text="Connect thanh cong. San sang Check / Export.")
 
-    # -------------------------------------------------------------- search
-    def _on_search(self):
+    # ----------------------------------------------------- RUN ALL (1 nut)
+    def _on_run_all(self):
+        """1 nut DUY NHAT cho ca Check Rule (muc 2+3) lan Export NAT (muc 4).
+        Luat quyet dinh phan nao duoc chay: xem core.build_run_plan()."""
         if self.config_root is None:
-            messagebox.showwarning("Chua ket noi", "Vui long Connect truoc khi Search.")
+            messagebox.showwarning("Chua ket noi", "Vui long Connect truoc khi chay.")
             return
-        dg_name = self.cmb_vsys.get()
+        dg_name = self.cmb_dg.get()
         if not dg_name:
             messagebox.showwarning("Thieu Device Group", "Vui long chon Device Group.")
             return
-        raw_text = self.txt_ips.get("1.0", "end")
-        valid_ips, invalid_lines = parse_ip_list_input(raw_text)
-        if invalid_lines:
-            preview = ", ".join(invalid_lines[:10]) + (" ..." if len(invalid_lines) > 10 else "")
-            self._log(f"Bo qua {len(invalid_lines)} dong khong hop le: {preview}")
 
-        logfile_path = self.ent_logfile.get().strip()
-        if logfile_path and not os.path.isfile(logfile_path):
-            messagebox.showwarning("File Log khong hop le", f"Khong tim thay file:\n{logfile_path}")
+        plan, errors = self._collect_plan()
+        if errors:
+            messagebox.showwarning("Kiem tra lai input", "\n\n".join(errors))
             return
 
-        nat_mode_full = self.var_export_nat.get() == "Yes"
-        nat_format = self.cmb_nat_format.get() or "xlsx"
+        # Dong khong hop le LE TE (van con IP hop le khac) -> chi ghi log, van chay.
+        if plan["invalid_ips"]:
+            preview = ", ".join(plan["invalid_ips"][:10]) + (" ..." if len(plan["invalid_ips"]) > 10 else "")
+            self._log(f"[Muc 2] Bo qua {len(plan['invalid_ips'])} dong khong hop le: {preview}")
+        if plan["nat_invalid"]:
+            preview = ", ".join(plan["nat_invalid"][:10]) + (" ..." if len(plan["nat_invalid"]) > 10 else "")
+            self._log(f"[Muc 4] Bo qua {len(plan['nat_invalid'])} dong khong hop le: {preview}")
 
-        nat_ip_raw = self.txt_nat_ips.get("1.0", "end")
-        nat_ips_input, nat_invalid_lines = parse_ip_list_input(nat_ip_raw)
-        if nat_invalid_lines:
-            preview = ", ".join(nat_invalid_lines[:10]) + (" ..." if len(nat_invalid_lines) > 10 else "")
-            self._log(f"[NAT] Bo qua {len(nat_invalid_lines)} dong IP khong hop le: {preview}")
-
-        if nat_mode_full:
-            # Yes = Full: luon xuat toan bo bang NAT; IP nhap (neu co) chi de highlight.
-            export_nat = True
-            nat_highlight_ips = nat_ips_input
-            nat_filter_ips = []
-        else:
-            # No = Search: KHONG xuat full - chi chay khi nguoi dung thuc su nhap
-            # IT NHAT 1 IP hop le de tim; IP do dung de LOC (chi giu rule khop) +
-            # highlight XANH LA gia tri khop, khong phai xuat toan bo bang NAT.
-            nat_filter_ips = nat_ips_input
-            export_nat = bool(nat_filter_ips)
-            nat_highlight_ips = []
-
-        # Muc 2 (danh sach IP) va muc 3 (File Log) khong bat buoc - nguoi dung
-        # co the chi dung rieng muc 4 (Export bang NAT). Chi bao loi neu KHONG
-        # co bat ky tinh nang nao duoc yeu cau.
-        if not valid_ips and not logfile_path and not export_nat:
-            if not nat_mode_full and nat_ip_raw.strip():
-                # Truong hop gay bao loi truoc day: chon "No" (Search) va co go
-                # IP vao o nhung TOAN BO khong hop le -> bao loi ro rang, khong
-                # phai bao loi chung chung "Thieu thong tin".
-                messagebox.showwarning(
-                    "IP tim NAT khong hop le",
-                    "Cac dong IP ban nhap de Search bang NAT deu khong hop le.\n"
-                    "Vui long kiem tra lai dinh dang IP (moi IP 1 dong).")
-            else:
-                messagebox.showwarning(
-                    "Thieu thong tin",
-                    "Vui long dan danh sach IP can tim (muc 2), hoac chon File Log (muc 3),\n"
-                    "hoac chon 'Export bang NAT': Yes (Full) hoac No + nhap IP can tim (Search).")
-            return
-
-        try:
-            worker_count = int(self.spn_threads.get())
-        except (ValueError, TypeError):
-            worker_count = DEFAULT_WORKERS
-        worker_count = max(20, min(50, worker_count))  # luon kep trong khoang 20-50 nguoi dung yeu cau
-        self.spn_threads.set(worker_count)
-
+        serial = self.ent_serial.get().strip()
+        if serial:
+            self._log(f"[Ghi chu] Target Firewall: {serial} - ket qua duoi day la rulebase "
+                      f"Panorama (Shared + chuoi DG) ap xuong firewall nay, CHUA tinh rule "
+                      f"cuc bo rieng cua chinh no (neu co).")
+        self.spn_threads.set(plan["worker_count"])
         self._set_busy(True)
         self.cancel_event.clear()
         self.progress["value"] = 0
         self.lbl_progress.config(text="Dang xu ly...")
-        threading.Thread(target=self._search_worker,
-                          args=(dg_name, valid_ips, logfile_path, worker_count,
-                                export_nat, nat_format, nat_mode_full, nat_highlight_ips, nat_filter_ips),
-                          daemon=True).start()
+        threading.Thread(target=self._run_all_worker, args=(dg_name, plan), daemon=True).start()
 
-    def _search_worker(self, dg_name, valid_ips, logfile_path, worker_count,
-                        export_nat, nat_format, nat_mode_full, nat_highlight_ips, nat_filter_ips):
+    @staticmethod
+    def _paths_note(output_paths):
+        """Khi bi Cancel giua chung, van cho biet file nao DA kip xuat (neu co)."""
+        if not output_paths:
+            return ""
+        return " File da xuat truoc do: " + ", ".join(os.path.basename(p) for p in output_paths)
+
+    def _run_all_worker(self, dg_name, plan):
+        """Chay tuan tu trong CUNG 1 thread: pipeline Check Rule truoc, pipeline
+        NAT sau (phan nao duoc chon), roi MOI export.
+
+        THAY DOI (10/2026 - theo yeu cau "dong chung 1 file cho gon"): khi 1 luot
+        lam CA HAI phan va dinh dang NAT la xlsx -> xuat DUNG 1 file
+        `rule_nat[_search]_<ts>.xlsx` gom 2 sheet "Security Rules" + "NAT Rules"
+        (template/dinh dang tung sheet giu nguyen 100%), thay vi 2 file roi rac.
+        Chi lam 1 phan -> van la 1 file nhu cu (`rule_*.xlsx` / `nat_*.xlsx`).
+        NAT chon dinh dang CSV thi KHONG gop duoc (csv khong co khai niem sheet)
+        -> van xuat 2 file va ghi log noi ro ly do."""
+        output_paths = []
         try:
-            has_ip_search = bool(valid_ips)
-            has_log_file = bool(logfile_path)
-            nat_highlight_set = set(nat_highlight_ips)
-            nat_filter_set = set(nat_filter_ips)
-            nat_desc = "Khong chay" if not export_nat else ("Full" if nat_mode_full else f"Search ({len(nat_filter_set)} IP)")
-            self._log(f"Bat dau: {len(valid_ips)} IP, Device Group={dg_name}, worker={worker_count}, "
-                      f"File Log={'Co' if has_log_file else 'Khong'}, Export NAT={nat_desc}"
-                      + (f", Highlight NAT={len(nat_highlight_set)} IP" if nat_highlight_set else ""))
+            rule_data = nat_data = None
 
-            output_paths = []
-            resolver = None  # tai su dung giua Search Rule va Export NAT neu ca 2 cung chay
-
-            log_entries = None
-            if has_log_file:
-                try:
-                    log_entries = parse_log_file(logfile_path)
-                    self._log(f"Doc File Log OK ({len(log_entries)} dong traffic) tu {os.path.basename(logfile_path)}")
-                    if not log_entries:
-                        self._log("CANH BAO: File Log khong co dong du lieu hop le nao (kiem tra lai header Source IP/Dest IP/Port)")
-                except Exception as e:
-                    self.logger.exception("Log file parse error")
-                    self.msg_queue.put(("error", f"Khong doc duoc File Log:\n{e}"))
-                    return
-
-            if has_ip_search or has_log_file:
-                rules, match_results, resolver, service_objects, service_groups = run_search_pipeline(
-                    self.config_root, dg_name, valid_ips, worker_count,
-                    log_func=self._log,
-                    progress_cb=lambda phase, d, t: self._set_progress(phase, d, t),
-                    cancel_event=self.cancel_event,
-                    registered_ip_tags=self.registered_ip_tags,
-                )
+            if plan["do_rule"]:
+                rule_data = self._run_rule_pipeline(
+                    dg_name, plan["valid_ips"], plan["logfile_path"], plan["worker_count"])
                 if self.cancel_event.is_set():
-                    self._log("Da huy theo yeu cau (Cancel).")
+                    self._log("Da huy theo yeu cau (Cancel)." + self._paths_note(output_paths))
                     return
+            else:
+                self._log("[Muc 2/3] De trong -> BO QUA Check Rule.")
 
-                self.lbl_progress.config(text="Exporting Excel (Rule)...")
-                rule_output_path = export_to_excel(OUTPUT_DIR, rules, match_results, resolver,
-                                                    service_objects, service_groups,
-                                                    log_entries=log_entries, log_func=self._log)
-                output_paths.append(rule_output_path)
-
-            if self.cancel_event.is_set():
-                self._log("Da huy theo yeu cau (Cancel).")
-                return
-
-            if export_nat:
-                self.lbl_progress.config(text="Dang doc bang NAT...")
-                nat_rules, resolver, nat_service_objects, nat_service_groups = run_nat_export_pipeline(
-                    self.config_root, dg_name,
-                    log_func=self._log,
-                    registered_ip_tags=self.registered_ip_tags,
-                    resolver=resolver,
-                )
+            if plan["do_nat"]:
+                nat_data = self._run_nat_pipeline(
+                    dg_name, plan["nat_mode_full"],
+                    plan["nat_filter_ips"], plan["nat_highlight_ips"])
                 if self.cancel_event.is_set():
-                    self._log("Da huy theo yeu cau (Cancel).")
+                    self._log("Da huy theo yeu cau (Cancel)." + self._paths_note(output_paths))
                     return
+            else:
+                self._log("[Muc 4] De trong -> BO QUA Export NAT.")
 
-                self.lbl_progress.config(
-                    text=f"Exporting bang NAT ({'Full' if nat_mode_full else 'Search'}, {nat_format})...")
-                if nat_format == "csv":
-                    nat_output_path = export_nat_to_csv(OUTPUT_DIR, nat_rules, resolver,
-                                                         nat_service_objects, nat_service_groups,
-                                                         highlight_ips=nat_highlight_set,
-                                                         filter_ips=nat_filter_set,
-                                                         log_func=self._log)
-                else:
-                    nat_output_path = export_nat_to_excel(OUTPUT_DIR, nat_rules, resolver,
-                                                           nat_service_objects, nat_service_groups,
-                                                           highlight_ips=nat_highlight_set,
-                                                           filter_ips=nat_filter_set,
-                                                           log_func=self._log)
-                output_paths.append(nat_output_path)
+            nat_is_csv = (plan["nat_format"] == "csv")
+            if rule_data and nat_data and not nat_is_csv:
+                self.lbl_progress.config(text="Exporting Excel (Rule + NAT, 1 file 2 sheet)...")
+                output_paths.append(export_combined_to_excel(
+                    OUTPUT_DIR,
+                    rules=rule_data["rules"],
+                    match_results=rule_data["match_results"],
+                    resolver=rule_data["resolver"],
+                    service_objects=rule_data["service_objects"],
+                    service_groups=rule_data["service_groups"],
+                    nat_rules=nat_data["nat_rules"],
+                    nat_resolver=nat_data["resolver"],
+                    nat_service_objects=nat_data["service_objects"],
+                    nat_service_groups=nat_data["service_groups"],
+                    log_entries=rule_data["log_entries"],
+                    highlight_ips=nat_data["highlight_ips"],
+                    filter_ips=nat_data["filter_ips"],
+                    log_func=self._log,
+                ))
+            else:
+                if rule_data and nat_data and nat_is_csv:
+                    self._log("[NAT] Dinh dang CSV khong gop duoc vao file Excel 2 sheet "
+                              "-> xuat rieng 2 file (chon 'xlsx' o muc 4 neu muon gop chung).")
+                if rule_data:
+                    self.lbl_progress.config(text="Exporting Excel (Rule)...")
+                    output_paths.append(export_to_excel(
+                        OUTPUT_DIR, rule_data["rules"], rule_data["match_results"],
+                        rule_data["resolver"], rule_data["service_objects"],
+                        rule_data["service_groups"],
+                        log_entries=rule_data["log_entries"], log_func=self._log))
+                if nat_data:
+                    self.lbl_progress.config(
+                        text="Exporting bang NAT ({}, {})...".format(
+                            "Full" if plan["nat_mode_full"] else "Search", plan["nat_format"]))
+                    exporter = export_nat_to_csv if nat_is_csv else export_nat_to_excel
+                    output_paths.append(exporter(
+                        OUTPUT_DIR, nat_data["nat_rules"], nat_data["resolver"],
+                        nat_data["service_objects"], nat_data["service_groups"],
+                        highlight_ips=nat_data["highlight_ips"],
+                        filter_ips=nat_data["filter_ips"], log_func=self._log))
 
-            self.msg_queue.put(("done_search", output_paths))
+            self.msg_queue.put(("done_run_all", output_paths))
         except PanApiError as e:
-            self._log(f"Search FAILED: {e.user_message}")
-            self.logger.exception("Search error")
+            self._log(f"FAILED: {e.user_message}")
+            self.logger.exception("Run all error")
             self.msg_queue.put(("error", e.user_message))
         except Exception:
-            self._log("Search FAILED: loi khong xac dinh (xem log.txt)")
-            self.logger.exception("Unexpected search error")
-            self.msg_queue.put(("error", "Da xay ra loi khong xac dinh khi Search. Xem log.txt de biet chi tiet."))
+            self._log("FAILED: loi khong xac dinh (xem log.txt)")
+            self.logger.exception("Unexpected run all error")
+            self.msg_queue.put(("error", "Da xay ra loi khong xac dinh. Xem log.txt de biet chi tiet."))
         finally:
             self.msg_queue.put(("enable_ui", None))
 
-    def _finish_search(self, output_paths):
+    def _run_rule_pipeline(self, dg_name, valid_ips, logfile_path, worker_count):
+        """Chay pipeline Check Rule (muc 2+3) va TRA VE DU LIEU THO - chua export.
+        Tach phan 'chay' khoi phan 'xuat file' de khi lam ca Rule lan NAT trong 1
+        luot thi gop duoc vao CUNG 1 file 2 sheet (xem export_combined_to_excel).
+        Noi dung pipeline GIU NGUYEN tu ban cu. Tra ve None neu bi Cancel."""
+        has_ip_search = bool(valid_ips)
+        has_log_file = bool(logfile_path)
+        self._log(f"Bat dau (Check Rule): {len(valid_ips)} IP, Device Group={dg_name}, worker={worker_count}, "
+                  f"File Log={'Co' if has_log_file else 'Khong'}")
+
+        log_entries = None
+        if has_log_file:
+            try:
+                log_entries = parse_log_file(logfile_path)
+                self._log(f"Doc File Log OK ({len(log_entries)} dong traffic) tu {os.path.basename(logfile_path)}")
+                if not log_entries:
+                    self._log("CANH BAO: File Log khong co dong du lieu hop le nao (kiem tra lai header Source IP/Dest IP/Port)")
+            except Exception as e:
+                self.logger.exception("Log file parse error")
+                raise PanApiError(f"Khong doc duoc File Log:\n{e}") from e
+
+        if not (has_ip_search or has_log_file):
+            return None
+
+        rules, match_results, resolver, service_objects, service_groups = run_search_pipeline(
+            self.config_root, dg_name, valid_ips, worker_count,
+            log_func=self._log,
+            progress_cb=lambda phase, d, t: self._set_progress(phase, d, t),
+            cancel_event=self.cancel_event,
+            registered_ip_tags=self.registered_ip_tags,
+        )
+        if self.cancel_event.is_set():
+            return None
+        return {
+            "rules": rules,
+            "match_results": match_results,
+            "resolver": resolver,
+            "service_objects": service_objects,
+            "service_groups": service_groups,
+            "log_entries": log_entries,
+        }
+
+    # -------------------------------------------------------------- export nat
+    def _run_nat_pipeline(self, dg_name, nat_mode_full, nat_filter_ips, nat_highlight_ips):
+        """Doc bang NAT (muc 4) va TRA VE DU LIEU THO - chua export (xem
+        _run_rule_pipeline). `resolver` van RIENG, khong dung chung voi Check Rule
+        - dung nguyen quyet dinh cu. Tra ve None neu bi Cancel."""
+        nat_desc = "Full" if nat_mode_full else f"Search ({len(set(nat_filter_ips))} IP)"
+        self._log(f"Bat dau (Export NAT): Device Group={dg_name}, che do={nat_desc}"
+                  + (f", Highlight NAT={len(set(nat_highlight_ips))} IP" if nat_highlight_ips else ""))
+        if self.cancel_event.is_set():
+            return None
+
+        self.lbl_progress.config(text="Dang doc bang NAT...")
+        nat_rules, resolver, nat_service_objects, nat_service_groups = run_nat_export_pipeline(
+            self.config_root, dg_name,
+            log_func=self._log,
+            registered_ip_tags=self.registered_ip_tags,
+            resolver=None,  # resolver doc lap hoan toan voi Check Rule
+        )
+        if self.cancel_event.is_set():
+            return None
+        return {
+            "nat_rules": nat_rules,
+            "resolver": resolver,
+            "service_objects": nat_service_objects,
+            "service_groups": nat_service_groups,
+            "highlight_ips": set(nat_highlight_ips),
+            "filter_ips": set(nat_filter_ips),
+        }
+
+    def _finish_run_all(self, output_paths):
         if isinstance(output_paths, str):  # tuong thich nguoc, phong khi con noi goi kieu cu
             output_paths = [output_paths]
+        if not output_paths:
+            self.lbl_progress.config(text="Khong co file nao duoc xuat.")
+            return
         names = ", ".join(os.path.basename(p) for p in output_paths)
         self.lbl_progress.config(text=f"Hoan tat: {names}")
         messagebox.showinfo("Hoan tat", "Da xuat ket qua:\n" + "\n".join(output_paths))
@@ -448,7 +573,7 @@ class App(ttk.Frame):
     def _set_busy(self, busy: bool):
         state = "disabled" if busy else "normal"
         self.btn_connect.config(state=state)
-        self.btn_search.config(state="disabled" if busy else ("normal" if self.config_root is not None else "disabled"))
+        self.btn_run.config(state="disabled" if busy else ("normal" if self.config_root is not None else "disabled"))
         self.btn_cancel.config(state="normal" if busy else "disabled")
         if busy:
             self.cmb_nat_format.config(state="disabled")

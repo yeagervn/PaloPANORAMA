@@ -116,6 +116,12 @@ class PanApiClient:
 # DIEU HUONG + PARSE XML CAU HINH
 # ============================================================================
 def get_vsys_list(config_root: ET.Element) -> List[str]:
+    """!!! KHONG PHAI bo chon pham vi cua ban PANORAMA !!!
+    Pham vi cua ban Panorama la DEVICE GROUP - dung `get_devicegroup_list()`.
+    Ham nay doc `/config/devices/entry/vsys/entry`, ma tren Panorama nhanh do la
+    chinh PANORAMA (localhost.localdomain), KHONG phai firewall duoc quan ly.
+    Giu lai CHI de doc vsys that cua 1 thiet bi khi can tham so `vsys` cho Live
+    Match (0.5) va cho test tuong thich - TUYET DOI khong dung lam dropdown pham vi."""
     """Lay danh sach ten VSYS truc tiep tu running-config da tai (khong can goi API rieng)."""
     names: List[str] = []
     devices = config_root.find("devices")
@@ -133,6 +139,8 @@ def get_vsys_list(config_root: ET.Element) -> List[str]:
 
 
 def get_vsys_element(config_root: ET.Element, vsys_name: str) -> Optional[ET.Element]:
+    """Xem canh bao o get_vsys_list() - khong dung lam nguon object cua ban Panorama
+    (object nam o Shared + chuoi Device Group, xem merge_layered_objects)."""
     devices = config_root.find("devices")
     if devices is None:
         return None
@@ -339,6 +347,10 @@ def assemble_security_rules(config_root: ET.Element, dg_name: str) -> List[Secur
 
 
 def parse_security_rules(vsys_el: ET.Element) -> List[SecurityRule]:
+    """Doc `<rulebase><security><rules>` kieu Firewall standalone (khong pre/post).
+    Tren PANORAMA cau truc nay KHONG ton tai o Device Group - chi dung khi doc rule
+    CUC BO cua chinh 1 firewall (0.3 buoc 3). Rulebase cua Device Group phai dung
+    `assemble_security_rules()`."""
     """(giu cho tuong thich nguoc) Doc Security Policy cua 1 container co the co
     <rulebase> phang (bản Firewall đơn). Bản Panorama nen dung assemble_security_rules."""
     rulebase = vsys_el.find("rulebase")
@@ -674,16 +686,3 @@ def assemble_nat_rules(config_root: ET.Element, dg_name: str) -> List[NatRule]:
     return assembled
 
 
-def parse_nat_rules(vsys_el: ET.Element) -> List[NatRule]:
-    """(giu cho tuong thich nguoc) Doc NAT Rule cua 1 container co the co <rulebase>
-    phang (bản Firewall đơn). Bản Panorama nen dung assemble_nat_rules."""
-    rulebase = vsys_el.find("rulebase")
-    if rulebase is None:
-        return []
-    nat = rulebase.find("nat")
-    if nat is None:
-        return []
-    rules_parent = nat.find("rules")
-    if rules_parent is None:
-        return []
-    return _parse_nat_rules_from_rules_el(rules_parent, "")

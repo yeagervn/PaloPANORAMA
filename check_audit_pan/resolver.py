@@ -25,11 +25,38 @@ class ResolvedAddr:
     ranges: List[Tuple[int, int]] = field(default_factory=list)
     is_any: bool = False
     unresolved: Set[str] = field(default_factory=set)
+    _merged_cache: Optional[List[Tuple[int, int]]] = field(default=None, init=False, repr=False, compare=False)
+
+    def _sorted_merged(self) -> List[Tuple[int, int]]:
+        if self._merged_cache is not None:
+            return self._merged_cache
+        if not self.ranges:
+            self._merged_cache = []
+            return self._merged_cache
+        sorted_ranges = sorted(self.ranges, key=lambda x: (x[0], x[1]))
+        merged: List[Tuple[int, int]] = [sorted_ranges[0]]
+        for a, b in sorted_ranges[1:]:
+            pa, pb = merged[-1]
+            if a <= pb + 1:
+                merged[-1] = (pa, max(pb, b))
+            else:
+                merged.append((a, b))
+        self._merged_cache = merged
+        return self._merged_cache
 
     def covers_range_wide(self, start: int, end: int) -> bool:
         if self.is_any:
             return True
-        return any(a <= start and end <= b for a, b in self.ranges)
+        merged = self._sorted_merged()
+        if not merged:
+            return False
+        import bisect
+        starts = [r[0] for r in merged]
+        idx = bisect.bisect_right(starts, start) - 1
+        if idx < 0:
+            return False
+        a, b = merged[idx]
+        return a <= start and end <= b
 
     def covers(self, other: 'ResolvedAddr') -> bool:
         """Self (R1) co bao phu toan bo other (R2) hay khong (superset)."""
@@ -43,6 +70,7 @@ class ResolvedAddr:
         self.ranges += other.ranges
         self.is_any = self.is_any or other.is_any
         self.unresolved |= other.unresolved
+        self._merged_cache = None
 
 
 class GroupResolver:
@@ -110,12 +138,39 @@ class ResolvedService:
     is_app_default: bool = False
     applications: List[str] = field(default_factory=list)
     ports: List[Tuple[Optional[str], int, int]] = field(default_factory=list)
+    _proto_cache: Optional[Dict[Optional[str], List[Tuple[int, int]]]] = field(default=None, init=False, repr=False, compare=False)
+
+    def _sorted_by_proto(self) -> Dict[Optional[str], List[Tuple[int, int]]]:
+        if self._proto_cache is not None:
+            return self._proto_cache
+        grouped: Dict[Optional[str], List[Tuple[int, int]]] = {}
+        for p, a, b in self.ports:
+            grouped.setdefault(p, []).append((a, b))
+        result: Dict[Optional[str], List[Tuple[int, int]]] = {}
+        for proto, lst in grouped.items():
+            lst.sort(key=lambda x: (x[0], x[1]))
+            merged: List[Tuple[int, int]] = [lst[0]] if lst else []
+            for a, b in lst[1:]:
+                pa, pb = merged[-1]
+                if a <= pb + 1:
+                    merged[-1] = (pa, max(pb, b))
+                else:
+                    merged.append((a, b))
+            result[proto] = merged
+        self._proto_cache = result
+        return self._proto_cache
 
     def _covers_port(self, proto: Optional[str], start: int, end: int) -> bool:
-        for p, a, b in self.ports:
-            if p == proto and a <= start and end <= b:
-                return True
-        return False
+        merged = self._sorted_by_proto().get(proto)
+        if not merged:
+            return False
+        import bisect
+        starts = [r[0] for r in merged]
+        idx = bisect.bisect_right(starts, start) - 1
+        if idx < 0:
+            return False
+        a, b = merged[idx]
+        return a <= start and end <= b
 
     def covers(self, other: 'ResolvedService') -> bool:
         if self.is_any:
@@ -138,6 +193,7 @@ class ResolvedService:
         self.is_app_default = self.is_app_default or other.is_app_default
         self.applications = list(dict.fromkeys(self.applications + other.applications))
         self.ports += other.ports
+        self._proto_cache = None
 
 
 class ServiceResolver:

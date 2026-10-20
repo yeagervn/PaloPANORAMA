@@ -52,6 +52,11 @@ from .matching_engine import find_first_allow_rule_match
 # xuong dong) - sau do _runs_to_rich_text() moi chuyen thanh openpyxl
 # CellRichText that su ghi vao cell.
 
+# Ten 2 sheet khi xuat GOP 1 file (xem export_combined_to_excel o cuoi file).
+RULE_SHEET_TITLE = "Security Rules"
+NAT_SHEET_TITLE = "NAT Rules"
+
+
 def _member_matches_target(value_str: str, target_ips: Set[str]) -> bool:
     """value_str la value hien thi cua 1 leaf member (vd '10.3.16.11' hoac
     '10.4.96.121-10.4.96.122'). Tra ve True neu no la 1 trong cac input IP
@@ -305,7 +310,7 @@ def export_to_excel(output_dir: str, rules: List[SecurityRule],
                      service_objects: Dict[str, ServiceObject],
                      service_groups: Dict[str, ServiceGroup],
                      log_entries: Optional[List[LogEntry]] = None,
-                     log_func=None) -> str:
+                     log_func=None, _wb_only: bool = False):
     """Luon dung template CO DINH nhung san trong script (khong con nhan
     template_path tu nguoi dung nua - da bo yeu cau chon file moi lan chay).
     Bản Panorama: chen cot "Vi tri Rule" ngay sau cot Name Rule. Neu
@@ -512,6 +517,13 @@ def export_to_excel(output_dir: str, rules: List[SecurityRule],
 
         row_num += 1
 
+    # `_wb_only=True` (noi bo, dung boi export_combined_to_excel): tra ve chinh
+    # Workbook da dien xong thay vi save ra dia - de con them sheet NAT vao CUNG
+    # 1 file. Noi dung/template/dinh dang sheet GIU NGUYEN 100%.
+    if _wb_only:
+        log_func(f"Sheet Rule da san sang ({len(matched_rule_indexes)} rule)")
+        return wb
+
     filename = f"rule_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
     output_path = os.path.join(output_dir, filename)
     wb.save(output_path)
@@ -647,8 +659,8 @@ def export_nat_to_excel(output_dir: str, nat_rules: List[NatRule], resolver: Gro
                          service_groups: Dict[str, ServiceGroup],
                          highlight_ips: Optional[Set[str]] = None,
                          filter_ips: Optional[Set[str]] = None,
-                         log_func=None) -> str:
-    """Xuat NAT Rule cua VSYS ra 1 file .xlsx rieng (workbook moi, khong dung
+                         log_func=None, _into_wb=None, _wb_only: bool = False):
+    """Xuat NAT Rule ra 1 file .xlsx rieng (workbook moi, khong dung
     template Security Rule). 2 CHE DO (muc 4 GUI):
       - FULL (chon 'Yes'): filter_ips rong/None -> xuat TOAN BO NAT Rule; neu
         co `highlight_ips` (tuy chon), gia tri Source/Destination/Translated
@@ -674,9 +686,16 @@ def export_nat_to_excel(output_dir: str, nat_rules: List[NatRule], resolver: Gro
         if not rules_to_export:
             log_func("[NAT Search] Khong tim thay NAT rule nao khop voi cac IP da nhap")
 
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "NAT Rules"
+    # `_into_wb` (noi bo): thay vi tao workbook moi, ghi NAT vao 1 SHEET moi cua
+    # workbook da cho (sheet Rule nam cung file). Toan bo header/dinh dang/mau/
+    # rich-text/logic loc GIU NGUYEN 100%.
+    if _into_wb is not None:
+        wb = _into_wb
+        ws = wb.create_sheet(NAT_SHEET_TITLE)
+    else:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = NAT_SHEET_TITLE
 
     header_font = Font(bold=True, color="FFFFFFFF")
     header_fill_hex = "FF305496"
@@ -745,6 +764,15 @@ def export_nat_to_excel(output_dir: str, nat_rules: List[NatRule], resolver: Gro
         ws.row_dimensions[row_num].height = 15.75 * max_lines
         row_num += 1
 
+    if _wb_only:
+        if search_mode:
+            log_func(f"Sheet NAT (Search) da san sang ({len(rules_to_export)}/{len(nat_rules)} rule khop "
+                     f"voi {len(filter_ips)} IP nhap tay)")
+        else:
+            log_func(f"Sheet NAT (Full) da san sang ({len(rules_to_export)} rule)"
+                     + (f" - highlight {len(highlight_ips)} IP nhap tay" if highlight_ips else ""))
+        return wb
+
     prefix = "nat_search" if search_mode else "nat"
     filename = f"{prefix}_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
     output_path = os.path.join(output_dir, filename)
@@ -755,6 +783,55 @@ def export_nat_to_excel(output_dir: str, nat_rules: List[NatRule], resolver: Gro
     else:
         log_func(f"Export NAT (Full) OK -> {filename} ({len(rules_to_export)} rule)"
                  + (f" - highlight {len(highlight_ips)} IP nhap tay" if highlight_ips else ""))
+    return output_path
+
+
+# ============================================================================
+# XUAT GOP 1 FILE 2 SHEET - 1 luot chay lam ca Rule lan NAT thi chi sinh 1 file
+# ============================================================================
+
+def export_combined_to_excel(output_dir: str,
+                              rules: List[SecurityRule],
+                              match_results: Dict[str, List[Tuple[int, str]]],
+                              resolver: GroupResolver,
+                              service_objects: Dict[str, ServiceObject],
+                              service_groups: Dict[str, ServiceGroup],
+                              nat_rules: List[NatRule],
+                              nat_resolver: GroupResolver,
+                              nat_service_objects: Dict[str, ServiceObject],
+                              nat_service_groups: Dict[str, ServiceGroup],
+                              log_entries: Optional[List[LogEntry]] = None,
+                              highlight_ips: Optional[Set[str]] = None,
+                              filter_ips: Optional[Set[str]] = None,
+                              log_func=None) -> str:
+    """Khi 1 luot chay lam CA Check Rule LAN Export NAT -> gop vao DUNG 1 file
+    .xlsx co 2 sheet thay vi sinh 2 file roi rac:
+      - Sheet "Security Rules": y het file rule_*.xlsx (template nhung san, cot
+        "Vi tri Rule" cua ban Panorama, 3 cot Log doi chieu neu co).
+      - Sheet "NAT Rules": y het file nat_*.xlsx (header/mau/rich-text/che do
+        Full-Search/highlight giu nguyen 100%).
+
+    Khong viet lai logic export nao: tai su dung chinh export_to_excel() va
+    export_nat_to_excel() o che do `_wb_only`/`_into_wb`. Dung 2 `resolver` RIENG
+    cho 2 phan, dung nhu khi xuat 2 file roi."""
+    log_func = log_func or (lambda msg: None)
+    os.makedirs(output_dir, exist_ok=True)
+
+    wb = export_to_excel(output_dir, rules, match_results, resolver,
+                          service_objects, service_groups,
+                          log_entries=log_entries, log_func=log_func, _wb_only=True)
+    wb.worksheets[0].title = RULE_SHEET_TITLE
+
+    export_nat_to_excel(output_dir, nat_rules, nat_resolver,
+                         nat_service_objects, nat_service_groups,
+                         highlight_ips=highlight_ips, filter_ips=filter_ips,
+                         log_func=log_func, _into_wb=wb, _wb_only=True)
+
+    prefix = "rule_nat_search" if filter_ips else "rule_nat"
+    filename = f"{prefix}_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+    output_path = os.path.join(output_dir, filename)
+    wb.save(output_path)
+    log_func(f"Export OK -> {filename} (2 sheet: {RULE_SHEET_TITLE} + {NAT_SHEET_TITLE})")
     return output_path
 
 

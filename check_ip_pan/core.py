@@ -336,19 +336,60 @@ NAT_HEADERS = [
 MAX_INPUT_RANGE_SIZE = 65536
 
 
+# SUA LOI (10/2026 - "input dang IP range tren device da co nhung tool khong doc
+# duoc"): o "Danh sach IP can tim" truoc day CHI nhan dung 1 dinh dang
+# "IP1-IP2" voi dau tru ASCII va KHONG co khoang trang. Thuc te file/clipboard cua
+# nguoi dung hay co: "10.1.1.1 - 10.1.1.5" (co khoang trang - bi parse_ip_list_input()
+# tach thanh 3 token roi chi tim duoc 2 dau mut!), en/em dash do Excel/Word tu doi,
+# dang rut gon octet cuoi "10.1.1.100-110", dung '~'/'..'/'to', kem '/32'.
+# 2 pattern duoi day dung CHUNG cho ca buoc chuan hoa (_normalize_range_text) va buoc
+# "no" range (_expand_range_token). LUU Y KIEN TRUC: check_ip KHONG BAO GIO import
+# check_rule (va nguoc lai) - day la ban sao doc lap co y, dung nguyen tac 3 package
+# cach ly 100%.
+_IPV4_TXT = r"\d{1,3}(?:\.\d{1,3}){3}"
+_RANGE_SEP_TXT = r"(?:[-\u2010\u2011\u2012\u2013\u2014\u2015\u2212~]|\.{2,}|\bto\b)"
+_RANGE_FULL_RE = re.compile(r"^(%s)(?:/32)?\s*%s\s*(%s)(?:/32)?$"
+                            % (_IPV4_TXT, _RANGE_SEP_TXT, _IPV4_TXT), re.IGNORECASE)
+_RANGE_SHORT_RE = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){2})\.(\d{1,3})(?:/32)?\s*%s\s*(\d{1,3})(?:/32)?$"
+                             % _RANGE_SEP_TXT, re.IGNORECASE)
+# Dung de GOM lai 1 range da bi khoang trang lam vo truoc khi tach token. Chi dung
+# [ \t]* (KHONG dung \s*) de khong bao gio gom 2 IP nam o 2 DONG khac nhau.
+_RANGE_INLINE_RE = re.compile(
+    r"(%s)(?:/32)?[ \t]*%s[ \t]*(%s|\d{1,3})(?:/32)?"
+    % (_IPV4_TXT, _RANGE_SEP_TXT, _IPV4_TXT), re.IGNORECASE)
+
+
+def _normalize_range_text(text: str) -> str:
+    """Gom moi dang range "IP <dau phan cach> IP/octet" thanh dang chuan "IP1-IP2"
+    (khong khoang trang) TRUOC khi parse_ip_list_input() tach token theo
+    khoang trang/dau phay - neu khong, "10.1.1.1 - 10.1.1.5" se bi tach thanh
+    3 token va chi tim duoc dung 2 dau mut (mat het IP o giua)."""
+    def _join(m):
+        a, b = m.group(1), m.group(2)
+        if "." not in b:  # dang rut gon octet cuoi: 10.1.1.100-110
+            b = "%s.%s" % (a.rsplit(".", 1)[0], b)
+        return "%s-%s" % (a, b)
+    return _RANGE_INLINE_RE.sub(_join, text or "")
+
+
 def _expand_range_token(tok: str) -> Optional[List[str]]:
-    """Neu tok la 1 range dang 'IP1-IP2' (vd '10.100.10.102-10.100.10.108'),
-    tra ve danh sach IP CU THE trong khoang do (bao gom ca 2 dau). Tra ve
-    None neu tok khong phai dinh dang range hop le (de con thu parse nhu 1
-    IP don o noi goi)."""
-    if "-" not in tok:
-        return None
-    parts = tok.split("-", 1)
-    if len(parts) != 2:
-        return None
+    """Neu tok la 1 range (vd '10.100.10.102-10.100.10.108', '10.100.10.102-108',
+    hoac dung en-dash/'~'/'..'/'to'), tra ve danh sach IP CU THE trong khoang do
+    (bao gom ca 2 dau). Tra ve None neu tok khong phai dinh dang range hop le (de
+    con thu parse nhu 1 IP don o noi goi)."""
+    tok = (tok or "").replace("\u00a0", " ").strip()
+    m = _RANGE_FULL_RE.match(tok)
+    if m:
+        a_txt, b_txt = m.group(1), m.group(2)
+    else:
+        m = _RANGE_SHORT_RE.match(tok)
+        if not m:
+            return None
+        a_txt = "%s.%s" % (m.group(1), m.group(2))
+        b_txt = "%s.%s" % (m.group(1), m.group(3))
     try:
-        start_ip = ipaddress.ip_address(parts[0].strip())
-        end_ip = ipaddress.ip_address(parts[1].strip())
+        start_ip = ipaddress.ip_address(a_txt)
+        end_ip = ipaddress.ip_address(b_txt)
     except ValueError:
         return None
     if start_ip.version != end_ip.version or int(start_ip) > int(end_ip):
@@ -374,7 +415,7 @@ def parse_ip_list_input(text: str) -> Tuple[List[str], List[str]]:
 
     Tra ve: (danh_sach_ip_hop_le, danh_sach_dong_khong_hop_le)
     """
-    tokens = re.split(r"[\s,;]+", text.strip())
+    tokens = re.split(r"[\s,;]+", _normalize_range_text(text).strip())
     seen: Set[str] = set()
     valid: List[str] = []
     invalid: List[str] = []
@@ -399,6 +440,97 @@ def parse_ip_list_input(text: str) -> Tuple[List[str], List[str]]:
         except ValueError:
             invalid.append(tok)
     return valid, invalid
+
+
+def build_run_plan(ip_text: str, logfile_path: str, nat_mode_full: bool,
+                    nat_ip_text: str, nat_format: str, worker_count_raw) -> Tuple[dict, List[str]]:
+    """Lap ke hoach + kiem tra input cho 1 luot bam nut "Check / Export" cua tab
+    CHECK IP (10/2026 - gop 2 nut "Check" va "Export NAT" thanh 1).
+
+    HAM THUAN TUY (khong dung tkinter, khong doc widget) de co the unit-test duoc
+    toan bo luat quyet dinh - GUI chi lam viec doc widget roi goi vao day.
+
+    LUAT (dung yeu cau nguoi dung):
+      - Check Rule (muc 2 + 3) chay khi: muc 2 co IT NHAT 1 IP hop le HOAC muc 3 co
+        File Log. De trong CA HAI -> bo qua phan nay, KHONG phai loi.
+      - Export NAT (muc 4) chay khi: chon "Yes (Full)" (khong can nhap IP), HOAC chon
+        "No (Search)" VA co it nhat 1 IP hop le. De trong o Search -> bo qua phan
+        nay, KHONG phai loi.
+      - Nhap ca 2 ben -> chay CA HAI trong cung 1 luot (xuat 2 file).
+      - Khong ben nao co du lieu -> errors, chan lai.
+      - O CO chu nhung KHONG co IP nao hop le -> errors (nguoi dung dinh tim that
+        nhung go sai dinh dang, KHONG duoc im lang bo qua).
+
+    Tra ve (plan, errors). errors rong = chay duoc."""
+    errors: List[str] = []
+
+    valid_ips, invalid_ips = parse_ip_list_input(ip_text or "")
+    if (ip_text or "").strip() and not valid_ips:
+        errors.append("Muc 2: khong co IP nao hop le (vd sai dinh dang: "
+                      + ", ".join(invalid_ips[:5]) + ").")
+
+    logfile_path = (logfile_path or "").strip()
+    if logfile_path:
+        if not os.path.isfile(logfile_path):
+            errors.append(f"Muc 3: khong tim thay file\n{logfile_path}")
+        elif os.path.splitext(logfile_path)[1].lower() not in (".xlsx", ".csv"):
+            ext = os.path.splitext(logfile_path)[1] or "khong co duoi"
+            errors.append(f"Muc 3: File Log chi ho tro .xlsx hoac .csv (dang chon: {ext}).")
+
+    nat_ips, nat_invalid = parse_ip_list_input(nat_ip_text or "")
+    if (nat_ip_text or "").strip() and not nat_ips:
+        errors.append("Muc 4: khong co IP nao hop le (vd sai dinh dang: "
+                      + ", ".join(nat_invalid[:5]) + ").")
+
+    do_rule = bool(valid_ips) or bool(logfile_path)
+    do_nat = bool(nat_mode_full) or bool(nat_ips)
+
+    if not do_rule and not do_nat:
+        errors.append(
+            "Chua co gi de chay. Can IT NHAT 1 trong 2:\n"
+            "  - Muc 2 (danh sach IP) va/hoac muc 3 (File Log)  -> Check Rule\n"
+            "  - Muc 4: chon 'Yes (Full)', hoac 'No (Search)' + nhap IP  -> Export NAT")
+
+    try:
+        worker_count = int(worker_count_raw)
+    except (ValueError, TypeError):
+        worker_count = DEFAULT_WORKERS
+    worker_count = max(20, min(50, worker_count))
+
+    plan = {
+        "do_rule": do_rule,
+        "do_nat": do_nat,
+        "valid_ips": valid_ips,
+        "invalid_ips": invalid_ips,
+        "logfile_path": logfile_path,
+        "nat_mode_full": bool(nat_mode_full),
+        "nat_format": (nat_format or "xlsx"),
+        # Yes (Full): IP nhap CHI de highlight. No (Search): IP nhap de LOC rule.
+        "nat_highlight_ips": nat_ips if nat_mode_full else [],
+        "nat_filter_ips": [] if nat_mode_full else nat_ips,
+        "nat_invalid": nat_invalid,
+        "worker_count": worker_count,
+    }
+    return plan, errors
+
+
+def describe_run_plan(plan: dict) -> str:
+    """1 dong mo ta luot chay sap toi, hien canh nut Run de nguoi dung biet TRUOC
+    khi bam la se chay cai gi (khong con phai doan nut nao lam viec gi)."""
+    parts = []
+    if plan.get("do_rule"):
+        n = len(plan.get("valid_ips") or [])
+        detail = f"{n} IP" if n else "File Log"
+        if n and plan.get("logfile_path"):
+            detail += " + File Log"
+        parts.append(f"Check Rule ({detail})")
+    if plan.get("do_nat"):
+        parts.append("Export NAT ({})".format(
+            "Full" if plan.get("nat_mode_full")
+            else f"Search {len(plan.get('nat_filter_ips') or [])} IP"))
+    if not parts:
+        return "Chua co gi de chay (xem muc 2/3/4)"
+    return "Se chay: " + " + ".join(parts)
 
 
 def is_literal_ip_or_cidr(s: str) -> bool:
