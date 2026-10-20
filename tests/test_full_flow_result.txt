@@ -4,8 +4,8 @@ Shadow findings: 3 ['R2-SHADOW-HIT0', 'R3-DISABLED', 'R4-OVERLY-ANY']
 Disabled findings: 1 ['R3-DISABLED']
 Overly findings: 2 ['R1-BROAD-ALLOW', 'R4-OVERLY-ANY']
 Total findings: 6
-Exported: /home/user/palopanorama/tests/output_for_review/audit_combo_20261020_115149.xlsx
-Exported CSV: /home/user/palopanorama/tests/output_for_review/audit_combo_20261020_115149.csv
+Exported: /home/user/palopanorama/tests/output_for_review/audit_combo_20261020_115317.xlsx
+Exported CSV: /home/user/palopanorama/tests/output_for_review/audit_combo_20261020_115317.csv
 Parse rows count: 6
   row: ('R2-SHADOW-HIT0', 'Shadow Rules', 'DG1-PRE', '0')
   row: ('R3-DISABLED', 'Shadow Rules', 'DG1-PRE', '')

@@ -301,3 +301,53 @@ class TestCandidateConfigTheoDG(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------- 0.7
+class TestHitCountBatBuocTarget(unittest.TestCase):
+    """0.7: `show rule-hit-count` la du lieu RUNTIME cua TUNG firewall, khong ton
+    tai o tang Panorama -> BAT BUOC `target=<serial>`. Thieu target: tra {} (nhanh
+    UNUSED tu tat, nhanh UNREACHABLE van chay doc lap - dung hanh vi D10)."""
+
+    def _client(self, calls):
+        from check_audit_pan.pan_api import PanApiClient
+        c = PanApiClient("1.2.3.4", "KEY")
+        c._request = lambda params: (calls.append(params) or
+                                     ET.fromstring("<response status='success'><result/></response>"))
+        return c
+
+    def test_thieu_target_tra_rong_va_khong_goi_api(self):
+        calls = []
+        out = self._client(calls).fetch_rule_hit_count("", log_func=lambda m: None)
+        self.assertEqual(out, {})
+        self.assertEqual(calls, [])
+
+    def test_co_target_thi_moi_lenh_deu_kem_tham_so_target(self):
+        calls = []
+        self._client(calls).fetch_rule_hit_count("001122334455", log_func=lambda m: None)
+        self.assertTrue(calls, "Phai goi API khi da co target")
+        for p in calls:
+            self.assertEqual(p["target"], "001122334455")
+            self.assertEqual(p["type"], "op")
+        self.assertTrue(any("pre-rulebase" in p["cmd"] for p in calls))
+        self.assertTrue(any("post-rulebase" in p["cmd"] for p in calls))
+
+
+class TestKienTrucDocLap(unittest.TestCase):
+    """Nguyen tac bat bien cua Suite: 3 package KHONG BAO GIO import lan nhau
+    (ke ca sang package cua ban Firewall standalone)."""
+
+    def test_3_package_khong_import_lan_nhau(self):
+        import os
+        import re
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        pkgs = ["check_rule_pan", "check_ip_pan", "check_audit_pan"]
+        forbidden = re.compile(r"\b(?:import|from)\s+(check_\w+)")
+        for pkg in pkgs:
+            for fn in sorted(os.listdir(os.path.join(root, pkg))):
+                if not fn.endswith(".py"):
+                    continue
+                src = open(os.path.join(root, pkg, fn), encoding="utf-8").read()
+                for other in forbidden.findall(src):
+                    self.assertEqual(other, pkg,
+                                     f"{pkg}/{fn} import sang package khac: {other}")
