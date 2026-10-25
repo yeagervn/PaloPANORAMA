@@ -91,6 +91,107 @@ def find_overly_permissive_rules(rules: List[RuleSnapshot]) -> List[Finding]:
     return out
 
 
+# Nguong mac dinh cho nhanh "rong theo VALUE THAT" (S6, 10/2026). Co the ghi de
+# qua tham so de nguoi dung tu dieu chinh theo quy mo mang cua minh.
+OVERLY_ADDR_THRESHOLD = 1024      # ~ /22 tro len
+OVERLY_PORT_THRESHOLD = 1024
+
+
+def _resolved_addr_count(ra) -> float:
+    """So dia chi THUC SU mot ResolvedAddr bao phu (da khu trung lap/chong lan).
+    'any' -> inf."""
+    if ra is None:
+        return 0
+    if getattr(ra, 'is_any', False):
+        return float('inf')
+    total = 0
+    for a, b in ra._sorted_merged():
+        total += (b - a + 1)
+    return total
+
+
+def _resolved_port_count(rs) -> float:
+    """So port mot ResolvedService cho phep. 'any' -> inf.
+    application-default khong dem duoc theo port -> 0 (khong ket luan)."""
+    if rs is None:
+        return 0
+    if getattr(rs, 'is_any', False):
+        return float('inf')
+    if getattr(rs, 'is_app_default', False):
+        return 0
+    total = 0
+    for _p, a, b in getattr(rs, 'ports', []) or []:
+        total += (b - a + 1)
+    return total
+
+
+def _fmt_big(v) -> str:
+    return "any" if v == float('inf') else f"{int(v)}"
+
+
+def find_overly_permissive_by_size(rules: List[RuleSnapshot], resolver, svc_resolver,
+                                   addr_threshold: int = OVERLY_ADDR_THRESHOLD,
+                                   port_threshold: int = OVERLY_PORT_THRESHOLD
+                                   ) -> List[Finding]:
+    """S6 (10/2026): rule rong theo **VALUE THAT** sau khi resolve, khong chi
+    literal `any`.
+
+    Vi sao can: trong mot ruleset da chin, rule nguy hiem **rat it khi** la literal
+    `any`. No la `GRP-ALL-SERVERS` ma ai do da nuoi len 400 member, hoac
+    `Net_10.0.0.0/8` lam Source. Nhanh literal-any (find_overly_permissive_rules,
+    D2) khong bao gio bat duoc nhung rule do - va do moi la dang pho bien nhat.
+
+    Ham nay KHONG thay the nhanh literal-any: no **bo sung**, va co y **bo qua** cac
+    rule da bi nhanh kia bat (tranh bao trung 1 rule 2 lan). Xep hang theo tich
+    `so_dia_chi x so_port` giam dan - dung thu tu ma mot auditor can doc.
+
+    Dung lai dung ResolvedAddr/ResolvedService cua chinh tab nay (_resolve_rules),
+    nen con so la so da KHU TRUNG LAP, khong phai "so member khai bao"."""
+    out: List[Finding] = []
+    if resolver is None or svc_resolver is None:
+        return out
+    _resolve_rules(rules, resolver, svc_resolver)
+    scored = []
+    for r in rules:
+        src_any = r.source == ["any"] or r.source == []
+        dst_any = r.destination == ["any"] or r.destination == []
+        port_any = r.service == ["any"] or r.service == []
+        if src_any or dst_any or port_any:
+            continue          # nhanh literal-any da bat - khong bao trung
+        n_src = _resolved_addr_count(getattr(r, 'resolved_source', None))
+        n_dst = _resolved_addr_count(getattr(r, 'resolved_destination', None))
+        n_port = _resolved_port_count(getattr(r, 'resolved_service', None))
+        conds = []
+        if n_src >= addr_threshold:
+            conds.append(f"Source rong: {_fmt_big(n_src)} dia chi")
+        if n_dst >= addr_threshold:
+            conds.append(f"Dest rong: {_fmt_big(n_dst)} dia chi")
+        if n_port >= port_threshold:
+            conds.append(f"Service rong: {_fmt_big(n_port)} port")
+        if not conds:
+            continue
+        # Pham vi phoi nhiem = so cap (dia chi x port) ma rule nay mo ra
+        exposure = max(n_src, 1) * max(n_dst, 1) * max(n_port, 1)
+        detail = (", ".join(conds) +
+                  f" | pham vi phoi nhiem ~ {_fmt_big(n_src)} nguon x "
+                  f"{_fmt_big(n_dst)} dich x {_fmt_big(n_port)} port")
+        scored.append((exposure, Finding(
+            check_type=CHECK_TYPE_OVERLY,
+            rule_name=r.name,
+            rule_uuid=r.uuid,
+            rule_index=r.index,
+            source=r.source,
+            destination=r.destination,
+            service=r.service,
+            action=r.action,
+            disabled=r.disabled,
+            detail=detail,
+        )))
+    scored.sort(key=lambda t: t[0], reverse=True)
+    out = [f for _sc, f in scored]
+    return out
+
+
 # ============================================================================
 # RESOLVE PHU TRO cho ca 2 nhanh UNREACHABLE
 # ============================================================================

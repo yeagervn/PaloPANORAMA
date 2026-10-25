@@ -39,7 +39,17 @@ MAX_MAX_COMBOS = 2000
 # moi dong tu mo executor rieng voi max_workers=thread_count, dinh diem co the
 # len toi thread_count x thread_count request dong thoi vao CUNG 1 firewall
 # (vd 30 -> ~900), vuot xa kha nang management plane PAN-OS. Co dinh 30 la du.
-LIVE_MATCH_CONCURRENCY = 30
+# S7 (10/2026): ha 30 -> 10 theo kinh nghiem van hanh.
+# `test security-policy-match` chay tren MANAGEMENT PLANE, va mgmt plane la cho yeu
+# nhat cua PA-3200/5200. 30 op-command dong thoi du de day mgmt CPU len cao va lam
+# CHAM COMMIT/LOGGING CUA NGUOI KHAC - tool audit khong duoc phep gay ra dieu do.
+# Them nua: moi call deu vao mgmt log, audit 2000 dong sinh hang chuc nghin dong
+# log API, auditor se hoi. 10 van du nhanh (tran nay la tong toan tool, doc lap voi
+# so DONG chay song song - xem live_match_semaphore).
+# RIENG BAN PANORAMA con nang hon: moi op-command co target= deu duoc PANORAMA
+# PROXY xuong firewall, va Panorama thuong la con undersize nhat trong estate -
+# nen tran nay quan trong hon ca o ban standalone.
+LIVE_MATCH_CONCURRENCY = 10
 
 
 class PANOSCheckerGUI(ttk.Frame):

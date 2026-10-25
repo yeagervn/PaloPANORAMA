@@ -35,6 +35,7 @@ from .pan_api import (
 from .resolver import GroupResolver, ServiceResolver
 from .detectors import (
     find_shadow_rules, find_disabled_rules, find_overly_permissive_rules,
+    find_overly_permissive_by_size,
 )
 from .excel_io import export_findings, parse_import_file
 
@@ -422,7 +423,17 @@ class App(ttk.Frame):
                 self._log(f"Disabled Rules: {len([f for f in findings if f.check_type == 'disabled'])} finding")
             if "overly_permissive" in types:
                 findings += find_overly_permissive_rules(rules)
-                self._log(f"Overly Permissive: {len([f for f in findings if f.check_type == 'overly_permissive'])} finding")
+                # S6 (10/2026): nhanh literal `any` mot minh KHONG du. Trong mot
+                # ruleset da chin, rule nguy hiem rat it khi la literal any - no la
+                # GRP-ALL-SERVERS da nuoi len 400 member, hoac Net_10.0.0.0/8 lam
+                # Source. Nhanh theo VALUE THAT (sau resolve) bat dung dang do; no
+                # BO SUNG, va tu bo qua cac rule nhanh literal-any da bat.
+                _by_size = find_overly_permissive_by_size(rules, resolver, svc_resolver)
+                findings += _by_size
+                self._log(f"Overly Permissive: "
+                          f"{len([f for f in findings if f.check_type == 'overly_permissive'])} finding "
+                          f"(trong do {len(_by_size)} phat hien theo kich thuoc THAT sau resolve, "
+                          f"xep theo pham vi phoi nhiem giam dan)")
             if "shadow" in types:
                 self._log(f"Đang audit Shadow Rules với ngưỡng Unused = {unused_threshold_days} ngày...")
                 shadow_findings = find_shadow_rules(rules, resolver, svc_resolver, hit_stats,

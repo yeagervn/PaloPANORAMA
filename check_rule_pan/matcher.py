@@ -101,6 +101,41 @@ class RowResult:
     # dong do duoc to xanh "FULL MATCH".
     unparsed_source: List[str] = field(default_factory=list)
     unparsed_dest: List[str] = field(default_factory=list)
+    # SUA LOI (10/2026 - "value that"): Source/Dest cua rule duoc chon con object
+    # KHONG resolve duoc ra IP (FQDN, Dynamic Address Group, object/group khong tim
+    # thay, kind='unknown', circular reference). Nhung object do dong gop 0 DIA CHI
+    # nen _is_exactly_scoped() DAT SAI -> tool tung de xuat "+ ADD" vao mot rule ma
+    # pham vi that cua no la KHONG XAC DINH. Nay cac nhanh "+ ADD" bi chan va 2 field
+    # duoi day cho exporter in ro ly do + ten object gay ra.
+    untrusted_scope: bool = False
+    untrusted_scope_detail: Optional[str] = None
+    # SUA LOI (10/2026 - zone la dieu kien match BAT BUOC cua PAN-OS): 3 trang thai
+    # 'match' | 'mismatch' | 'unknown' - xem _zone_verdict(). 'mismatch' chan rule
+    # khoi TOP1/1.1/2/3; 'unknown' GIU tier nhung phai noi ro chua kiem duoc.
+    zone_verdict: str = 'unknown'
+    zone_unknown_detail: Optional[str] = None
+    # SUA LOI (10/2026 - TOP1.1 khong kiem Service): ten rule co Service=any ma
+    # Source/Dest khop DUNG request. Traffic do THUC TE da duoc phep, nhung theo luat
+    # da chot II.2.2 thi rule service=any KHONG BAO GIO duoc lam ket qua -> day chi la
+    # dong THONG TIN MINH BACH, khong phai ket luan cua dong.
+    broad_service_rule: Optional[str] = None
+    # S4 (10/2026): hau qua cua chinh hanh dong tool dang de xuat. Mot dong
+    # "+ ADD SOURCE" khong chi them 1 IP vao 1 rule - no cap cho IP do quyen di tói
+    # TOAN BO Dest cua rule tren TOAN BO port cua rule. 10 nam van hanh thi khong
+    # mau nao, canh bao nao doi duoc hanh vi nguoi phe duyet bang viec cho ho thay
+    # HAU QUA ngay luc ky.
+    blast_radius: Optional[str] = None
+    # S5 (10/2026): rule deny/drop dung TRUOC diem chen se khop traffic nay. Cau hoi
+    # quyet dinh cua moi request moi thuong khong phai "co rule allow chua" ma "phia
+    # tren co deny nao chan truoc khong" - them rule moi ben duoi no la vo tac dung.
+    blocking_deny_rule: Optional[str] = None
+    blocking_deny_detail: Optional[str] = None
+    # P2 (10/2026 - CHI CO O BAN PANORAMA): rule deny chan traffic nay nam o
+    # `Shared-PRE`. Theo thu tu lap rap 0.3 (Shared-PRE -> DG-chain-PRE ->
+    # DG-chain-POST -> Shared-POST), KHONG rule nao trong Device Group co the dung
+    # TRUOC Shared-PRE - nghia la viec "them rule moi vao DG" KHONG BAO GIO giai
+    # quyet duoc truong hop nay. Ket luan dung phai la "phai sua Shared-PRE".
+    blocked_at_shared_pre: bool = False
 
 
 # =========================================================================
@@ -235,6 +270,36 @@ def _is_exactly_scoped(resolved: ResolvedAddr, ranges) -> bool:
     return resolved.union_address_count() == _ranges_total_count(ranges)
 
 
+def _untrusted_scope_names(resolved: ResolvedAddr) -> List[str]:
+    """Ten cac object trong 1 field (Source/Dest cua rule) KHONG resolve duoc ra IP.
+
+    Moi object nhu vay dong gop 0 dia chi vao ResolvedAddr, nen chung lam
+    `union_address_count()` NHO HON pham vi thuc te ma rule cover tren thiet bi.
+    Xem docstring cua _scope_trustworthy() de biet vi sao dieu do nguy hiem."""
+    return sorted(resolved.unresolved)
+
+
+def _scope_trustworthy(resolved: ResolvedAddr) -> bool:
+    """Pham vi cua field nay co DO DUOC khong - tuc `union_address_count()` co phai
+    la con so THAT hay khong.
+
+    False khi field con object khong resolve duoc (FQDN / Dynamic Address Group /
+    object khong tim thay / kind unknown / circular reference). Luc do tren thiet bi
+    field con cover THEM mot tap KHONG XAC DINH, trong khi tool chi dem duoc phan
+    resolve duoc.
+
+    BAT BUOC dung o moi noi ket luan "AN TOAN de bo sung phan con thieu vao rule
+    nay" (TOP1.1 / TOP2 / TOP3): ket luan do dua tren "ben kia khop CHINH XAC pham
+    vi cua anh" - sai ngay khi pham vi do khong do duoc. KHONG dung cho TOP1: TOP1
+    ket luan "da duoc phep, khong can lam gi", va mot member FQDN/DAG THEM VAO khong
+    lam traffic do thanh khong duoc phep, nen ket luan do van dung va an toan.
+
+    Phan biet quan trong: pham vi "DA BIET rong hon" (field 14 dia chi, member khop
+    4 - nguoi dung da chap nhan qua _exact_member_scope) KHAC pham vi "KHONG XAC
+    DINH". Cai dau da duoc chap nhan, cai sau thi chua bao gio."""
+    return not resolved.unresolved
+
+
 def _exact_member_scope(members: List[Tuple[str, str, "ResolvedAddr"]], ranges) -> Optional[int]:
     """Kiem tra field (Source hoac Dest cua 1 rule, co the gom NHIEU object khac
     nhau) co chua DUNG 1 member RIENG LE dai dien CHINH XAC 1:1 cho toan bo
@@ -310,6 +375,66 @@ def _compute_zone_warning(rule: SecurityRule, src_ranges, dst_ranges,
     if missing_dst:
         parts.append(f"Dest Zone can bo sung: {', '.join(sorted(missing_dst))}")
     return " | ".join(parts)
+
+
+ZONE_MATCH, ZONE_MISMATCH, ZONE_UNKNOWN = 'match', 'mismatch', 'unknown'
+
+
+def _zones_resolvable(ranges, zone_lookup) -> bool:
+    """MOI dau mut trong `ranges` co suy duoc zone tu bang Interface/Zone khong.
+
+    False khi co 1 dau mut nam ngoai moi subnet interface - truong hop that:
+    source nam SAU mot router, hoac thiet bi co default route. Luc do tuyet doi
+    KHONG duoc ket luan "zone lech", vi suy luan cua ta moi la cai thieu du lieu."""
+    if not zone_lookup:
+        return False
+    for (st, en, _t) in ranges:
+        if resolve_zone_for_ip(st, zone_lookup) is None:
+            return False
+        if en != st and resolve_zone_for_ip(en, zone_lookup) is None:
+            return False
+    return True
+
+
+def _zone_verdict(rule: SecurityRule, src_ranges, dst_ranges, zone_lookup):
+    """3 TRANG THAI, khong phai 2. Tra ve (verdict, chi_tiet_unknown).
+
+    PAN-OS coi `from`/`to` zone la dieu kien match BAT BUOC: rule `trust -> dmz`
+    KHONG cho phep cung luong traffic di vao tu zone `vpn`. Truoc 10/2026 tool
+    da TINH DUNG zone con thieu (_compute_zone_warning) nhung
+    `_compute_action_level()` khong he doc no -> dong lech zone van duoc to XANH LA
+    "FULL MATCH". Do la false "da duoc phep": requester dong ticket, app team
+    debug 2 ngay vi firewall van chan.
+
+    - ZONE_MATCH    : moi dau mut suy duoc zone VA zone cua rule du (hoac 'any')
+    - ZONE_MISMATCH : moi dau mut suy duoc zone NHUNG rule thieu zone -> rule nay
+                      KHONG duoc lam ket qua chinh (TOP1/1.1/2/3), chi con la tham khao
+    - ZONE_UNKNOWN  : khong co bang Interface/Zone, HOAC co dau mut khong suy duoc
+                      zone, HOAC rule khong khai bao zone -> GIU tier (khong tao
+                      false negative) nhung PHAI noi ro la chua kiem duoc
+
+    Vi sao can trang thai thu 3: zone suy bang longest-prefix tren bang
+    Interface/Zone, khong dang tin khi co default route / route chong lan / source
+    sau router. Gate 2 trang thai thi mot suy luan sai se bao "can tao rule moi"
+    trong khi rule da ton tai -> sinh rule TRUNG. Huong sai do an toan hon
+    false-allow nhung van la rac trong rulebase."""
+    if not zone_lookup:
+        return ZONE_UNKNOWN, "khong doc duoc bang Interface/Zone tu cau hinh thiet bi"
+    if not rule.from_zones or not rule.to_zones:
+        return ZONE_UNKNOWN, "rule khong khai bao from/to zone"
+    src_ok = _zones_resolvable(src_ranges, zone_lookup)
+    dst_ok = _zones_resolvable(dst_ranges, zone_lookup)
+    if not src_ok or not dst_ok:
+        ben = []
+        if not src_ok:
+            ben.append("Source")
+        if not dst_ok:
+            ben.append("Dest")
+        return ZONE_UNKNOWN, (f"khong suy duoc zone cho {'/'.join(ben)} (dia chi nam "
+                              f"ngoai moi subnet interface - vd nam sau 1 router)")
+    missing = _missing_zones(src_ranges, rule.from_zones, zone_lookup) | \
+        _missing_zones(dst_ranges, rule.to_zones, zone_lookup)
+    return (ZONE_MISMATCH if missing else ZONE_MATCH), None
 
 
 # =========================================================================
@@ -1158,7 +1283,18 @@ def _scan_all_tiers(rule_infos: List[RuleInfo], src_ranges, dst_ranges, ports,
         # kien - giong het vong lap TOP1 rieng biet ban goc (dieu kien copy nguyen
         # van, khong doi 1 ky tu). Tim duoc la BREAK NGAY, khong can xet gi them cho
         # dong request nay nua (dung y het hanh vi "return" cua ban goc). ----
-        if not both_any and _service_ok_for_match(ri.service, ports) and \
+        # ---- CONG CHAN ZONE (10/2026): zone la dieu kien match BAT BUOC cua
+        # PAN-OS. Rule bi ket luan ZONE_MISMATCH (moi dau mut suy duoc zone
+        # NHUNG rule thieu zone) KHONG duoc lam ket qua chinh - firewall that
+        # se chan traffic do, bao "FULL MATCH" la false "da duoc phep". Rule
+        # do KHONG mat di: 2 nhanh near_top2/near_top3 ben duoi van nhan no lam
+        # THAM KHAO. ZONE_UNKNOWN thi KHONG chan (xem docstring _zone_verdict).
+        zone_blocked = False
+        if zone_lookup:
+            _zv, _zu = _zone_verdict(ri.rule, src_ranges, dst_ranges, zone_lookup)
+            zone_blocked = (_zv == ZONE_MISMATCH)
+        
+        if not zone_blocked and not both_any and _service_ok_for_match(ri.service, ports) and \
            _side_all(ri.source, src_ranges, wide=False) and \
            _side_all(ri.dest, dst_ranges, wide=False):
             top1_match = ri
@@ -1170,10 +1306,20 @@ def _scan_all_tiers(rule_infos: List[RuleInfo], src_ranges, dst_ranges, ports,
         # ---- TOP1.1: chi ghi nhan CANDIDATE DAU TIEN (dieu kien copy nguyen van tu
         # vong lap TOP1.1 ban goc) - KHONG break, vi 1 rule TOP1 co the xuat hien o
         # vi tri SAU trong list va phai duoc uu tien tuyet doi hon. ----
-        if top1_1_match is None and not both_any and \
+        if top1_1_match is None and not zone_blocked and not both_any and \
            _side_all(ri.source, src_ranges, wide=False) and _side_all(ri.dest, dst_ranges, wide=False):
-            if _is_exactly_scoped(ri.source, src_ranges) and _is_exactly_scoped(ri.dest, dst_ranges):
-                top1_1_match = ri
+            if _is_exactly_scoped(ri.source, src_ranges) and _is_exactly_scoped(ri.dest, dst_ranges) \
+               and _scope_trustworthy(ri.source) and _scope_trustworthy(ri.dest):
+                # SUA LOI (10/2026): TOP1.1 la tier DUY NHAT khong goi
+                # _service_ok_for_match(). Neu rule co Service=any thi port KHONG HE
+                # thieu - rule da cho phep port do roi - va loi khuyen "+ ADD PORT"
+                # tro thanh mot change VO NGHIA; te hon la no gan 1 port object vao
+                # rule service=any, lam rule do TRONG CO CHU DICH, lan audit sau kho
+                # bat hon. Theo LUAT DA CHOT II.2.2, rule service=any KHONG BAO GIO
+                # duoc lam ket qua -> de dong di tiep xuong cac tier duoi y nhu rule
+                # do khong ton tai (viec bao cao do _find_broad_service_rule lo).
+                if not ri.service.is_any:
+                    top1_1_match = ri
                 skip_lower_tiers = True
                 continue
 
@@ -1194,14 +1340,21 @@ def _scan_all_tiers(rule_infos: List[RuleInfo], src_ranges, dst_ranges, ports,
         # ca field). Khi _exact_member_scope tra None, hanh vi y het truoc day.
         dest_member_scope = _exact_member_scope(ri.dest_members, dst_ranges)
         source_member_scope = _exact_member_scope(ri.source_members, src_ranges)
-        dest_exact_ok = _is_exactly_scoped(ri.dest, dst_ranges) or dest_member_scope is not None
-        source_exact_ok = _is_exactly_scoped(ri.source, src_ranges) or source_member_scope is not None
+        # CONG CHAN "value that" (10/2026): pham vi phai DO DUOC moi duoc ket luan
+        # exact-scope. Field con object khong resolve duoc -> exact_ok = False -> 2
+        # nhanh near_top2/near_top3 ngay duoi tu dong nhan lay rule nay lam THAM
+        # KHAO (dung co che demote da co san), thay vi de xuat "+ ADD" vao mot pham
+        # vi khong xac dinh. Khong them nhanh moi nao.
+        dest_exact_ok = (_is_exactly_scoped(ri.dest, dst_ranges) or dest_member_scope is not None) \
+            and _scope_trustworthy(ri.dest)
+        source_exact_ok = (_is_exactly_scoped(ri.source, src_ranges) or source_member_scope is not None) \
+            and _scope_trustworthy(ri.source)
 
         # ---- TOP2 candidacy (dieu kien copy nguyen van vong lap TOP2 ban goc) ----
-        if port_ok and dest_full and dest_exact_ok:
+        if port_ok and dest_full and dest_exact_ok and not zone_blocked:
             top2.append((src_covered_cnt, ri, dest_member_scope))
         # ---- TOP3 candidacy (dieu kien copy nguyen van vong lap TOP3 ban goc) ----
-        if port_ok and source_full and source_exact_ok:
+        if port_ok and source_full and source_exact_ok and not zone_blocked:
             top3.append((dst_covered_cnt, ri, source_member_scope))
 
         # ---- near_top2/near_top3/generic (dieu kien copy nguyen van tu
@@ -1338,7 +1491,269 @@ def _describe_nearest_rule(ri: RuleInfo, src_ranges, dst_ranges, ports) -> str:
 # MAIN ROW CLASSIFICATION ENGINE
 # =========================================================================
 
-def classify_row(
+def _tag_blast_radius(res: RowResult, rule_infos: List[RuleInfo]) -> RowResult:
+    """S4: gan cau mo ta hau qua cho MOI dong co de xuat "+ ADD".
+
+    Chi lam bao cao - khong doi tier/thu tu/ket luan nao. LUU Y co chu dich: KHONG
+    doi thu tu sort cua near_top2/near_top3, vi khoa sort dau tien cua chung da la
+    `scope_size cua ben DA KHOP tang dan` = da uu tien rule co blast radius NHO
+    NHAT. Phan thieu truoc gio chi la nguoi doc KHONG THAY con so do."""
+    rule = res.rule or res.nearest_rule
+    if rule is None:
+        return res
+    ri = next((x for x in rule_infos if x.rule is rule), None)
+    if ri is None:
+        return res
+    side = None
+    if res.tier == 'TOP2' or res.nearest_rule_kind == 'near_top2':
+        side = 'source'
+    elif res.tier == 'TOP3' or res.nearest_rule_kind == 'near_top3':
+        side = 'dest'
+    elif res.tier == 'TOP1.1':
+        side = 'port'
+    if side is None:
+        return res
+    # Khong co gi de "+ ADD" nua (da cover du qua object rong) -> khong noi hau qua
+    if res.wide_fully_covered or res.nearest_fully_covered:
+        return res
+    res.blast_radius = _blast_radius_text(ri, side)
+    return res
+
+
+def _tag_blocking_deny(res: RowResult, rule_infos: List[RuleInfo],
+                       src_ranges, dst_ranges) -> RowResult:
+    """S5: canh bao rule deny/drop dung TRUOC diem chen.
+
+    Chi gan khi chua co shadow_warning (shadow_warning la truong hop "da chon duoc
+    1 rule allow nhung bi deny chan truoc no" - da co tu truoc). O day phu dung
+    khoang trong con lai: cac dong KHONG chon duoc rule allow nao (TOP4 / can tao
+    rule moi) thi truoc gio khong ai kiem deny ca."""
+    if res.shadow_warning:
+        return res
+    # SUA LOI (phat hien nho fixture ban Panorama): chi canh bao khi KHONG chon duoc
+    # rule allow nao lam ket qua (res.rule is None). Neu DA chon duoc 1 rule cu the
+    # thi cau hoi "co deny nao chan truoc no khong" da do _find_shadowing_rule() tra
+    # loi DUNG CACH - ham do so INDEX voi candidate. Con ham nay quet ca rulebase
+    # nen se bao ca nhung deny nam SAU rule da khop (vd thu tu Panorama
+    # DG-PRE -> DG-POST: mot deny o DG-POST khong he chan rule allow o DG-PRE).
+    if res.rule is not None:
+        return res
+    ports = res.row.port_tokens
+    ri = _find_blocking_deny_rule(rule_infos, src_ranges, dst_ranges, ports)
+    if ri is None:
+        return res
+    res.blocking_deny_rule = ri.rule.name
+    vi_tri = getattr(ri.rule, 'vi_tri', '') or ''
+    if vi_tri == 'Shared-PRE':
+        # P2: khac han ban standalone. Thu tu lap rap 0.3 la
+        # Shared-PRE -> DG-chain-PRE -> DG-chain-POST -> Shared-POST, nen KHONG rule
+        # nao trong Device Group co the dung TRUOC Shared-PRE. "Them rule moi vao DG"
+        # o day la viec VO NGHIA - dong nao cung the. Ket luan dung la phai sua
+        # chinh Shared-PRE, va do thuong KHONG phai quyen cua nguoi quan tri DG nay.
+        res.blocked_at_shared_pre = True
+        res.blocking_deny_detail = (
+            f"rule '{ri.rule.name}' (action={ri.rule.action}) nam o SHARED-PRE va se "
+            f"khop traffic nay TRUOC MOI rule cua Device Group. KHONG THE cap phep "
+            f"tu Device Group nay - them rule moi vao DG se KHONG co tac dung o bat "
+            f"ky vi tri nao. Phai sua chinh rule o Shared-PRE (thuong can quyen quan "
+            f"tri Panorama cap cao hon).")
+    else:
+        res.blocking_deny_detail = (
+            f"rule '{ri.rule.name}' (action={ri.rule.action}, vi tri {vi_tri or '?'}, "
+            f"thu tu #{ri.rule.index}) se khop traffic nay TRUOC. Rule moi phai dat "
+            f"TREN no, neu khong thi them rule cung khong thong.")
+    return res
+
+
+def _tag_untrusted_scope(res: RowResult, rule_infos: List[RuleInfo]) -> RowResult:
+    """Gan RowResult.untrusted_scope/_detail theo rule ma dong nay dang tro tói.
+
+    CHI la lop BAO CAO - khong he doi tier/ket luan nao (viec chan da lam o
+    _scan_all_tiers qua _scope_trustworthy()). Muc dich: admin doc export phai thay
+    DUNG TEN object lam cho pham vi cua rule khong do duoc, ke ca o nhanh TOP1 (noi
+    tool CO Y khong demote) - vi do la thong tin audit that, khong phai canh bao sai.
+    """
+    rule = res.rule or res.nearest_rule
+    if rule is None:
+        return res
+    ri = next((x for x in rule_infos if x.rule is rule), None)
+    if ri is None:
+        return res
+    parts = []
+    for side_name, resolved in (("Source", ri.source), ("Dest", ri.dest)):
+        names = _untrusted_scope_names(resolved)
+        if names:
+            parts.append(f"{side_name} cua rule con {len(names)} object KHONG resolve duoc "
+                         f"ra IP: {', '.join(names)}")
+    if parts:
+        res.untrusted_scope = True
+        res.untrusted_scope_detail = (
+            " | ".join(parts) +
+            " -> pham vi THAT cua rule rong hon con so tool dem duoc (FQDN/Dynamic "
+            "Address Group/object khong tim thay resolve o runtime tren thiet bi), "
+            "nen KHONG duoc coi la khop chinh xac 1:1 de bo sung vao rule nay")
+    return res
+
+
+def _service_port_span(service: ResolvedService) -> Optional[int]:
+    """So PORT ma 1 ResolvedService cho phep. None = 'any' (khong dem duoc)."""
+    if service.is_any:
+        return None
+    if service.is_appdefault_portless:
+        return 0
+    total = len(service.exact_ports)
+    for _p, a, b in service.ranges:
+        total += (b - a + 1)
+    return total
+
+
+def _fmt_count(n) -> str:
+    return "khong gioi han (any)" if n is None else f"{n}"
+
+
+def _blast_radius_text(ri: "RuleInfo", side_added: str,
+                       matched_member_scope: Optional[int] = None) -> str:
+    """Cau mo ta HAU QUA cua de xuat "+ ADD <side>" vao rule nay.
+
+    side_added: 'source' | 'dest' | 'port'
+      - them SOURCE -> IP moi duoc quyen di tói TOAN BO Dest cua rule, tren toan bo
+        port cua rule
+      - them DEST   -> TOAN BO Source cua rule duoc quyen di tói dich moi
+      - them PORT   -> toan bo cap Source x Dest cua rule duoc mo thEm port do
+
+    matched_member_scope: khi exact-scope dat duoc nho _exact_member_scope() (field
+    cua rule RONG HON request, nhung co 1 member khop 1:1) thi phai noi RO ca hai
+    con so - nguoi dung da chap nhan pham vi "DA BIET rong hon" nay, nhung nguoi
+    phe duyet van can thay no."""
+    n_src = ri.source.total_address_count()
+    n_dst = ri.dest.total_address_count()
+    n_port = _service_port_span(ri.service)
+
+    def _n(v):
+        return "khong gioi han (any)" if v == float('inf') else f"{int(v)}"
+
+    if side_added == 'source':
+        txt = (f"Source duoc them se co quyen di tói {_n(n_dst)} dia chi dich "
+               f"x {_fmt_count(n_port)} port cua rule '{ri.rule.name}'")
+        if matched_member_scope is not None and n_dst != float('inf') and \
+                matched_member_scope < n_dst:
+            txt += (f" - LUU Y: field Dest cua rule gom {_n(n_dst)} dia chi, trong do "
+                    f"member khop dung request chi {matched_member_scope}")
+    elif side_added == 'dest':
+        txt = (f"Dich duoc them se mo cho {_n(n_src)} dia chi nguon "
+               f"x {_fmt_count(n_port)} port cua rule '{ri.rule.name}'")
+        if matched_member_scope is not None and n_src != float('inf') and \
+                matched_member_scope < n_src:
+            txt += (f" - LUU Y: field Source cua rule gom {_n(n_src)} dia chi, trong do "
+                    f"member khop dung request chi {matched_member_scope}")
+    else:
+        txt = (f"Port duoc them se mo cho {_n(n_src)} nguon x {_n(n_dst)} dich "
+               f"cua rule '{ri.rule.name}'")
+    return txt
+
+
+def _find_blocking_deny_rule(rule_infos: List[RuleInfo], src_ranges, dst_ranges,
+                             ports) -> Optional[RuleInfo]:
+    """Rule deny/drop/reset DAU TIEN theo thu tu rulebase se khop traffic nay.
+
+    Khac _find_shadowing_rule(): ham do can mot `candidate` da duoc chon va chi xet
+    cac rule DUNG TRUOC candidate do. Khi KHONG co rule allow nao khop (tier TOP4 /
+    "chua co Rule - can tao moi") thi khong co candidate nao ca, nen truoc 10/2026
+    KHONG AI kiem xem phia tren co deny hay khong. Hau qua rat that: admin tao rule
+    moi, dat ben duoi mot deny da khop san -> "da them rule roi ma van khong thong".
+
+    Dung _side_all_for_shadow/_ports_covered_for_shadow (CO xet is_any) de khong bo
+    sot cac rule deny dung source=any/dest=any/service=any - dang pho bien nhat cua
+    rule chan."""
+    for ri in rule_infos:
+        if ri.rule.disabled or ri.rule.action == 'allow':
+            continue
+        if _ports_covered_for_shadow(ri.service, ports) and \
+           _side_all_for_shadow(ri.source, src_ranges) and \
+           _side_all_for_shadow(ri.dest, dst_ranges):
+            return ri
+    return None
+
+
+def _find_broad_service_rule(rule_infos, src_ranges, dst_ranges):
+    """Ten rule DAU TIEN co Service=any ma Source/Dest khop DUNG request.
+
+    Dung cho BAO CAO MINH BACH, KHONG phai ket luan cua dong: theo luat da chot
+    II.2.2, rule service=any khong bao gio duoc lam ket qua. Nhung im lang hoan toan
+    thi cung sai - admin can biet "traffic nay THUC TE da duoc phep boi 1 rule qua
+    rong", de di don rule do (tab CHECK AUDIT - Overly Permissive) thay vi tao them
+    rule moi, hoac - te nhat - gan them 1 port object vao chinh rule service=any do
+    (dung loi ma nhanh TOP1.1 tung mac truoc 10/2026)."""
+    for ri in rule_infos:
+        if not ri.service.is_any:
+            continue
+        if ri.source.is_any and ri.dest.is_any:
+            continue          # any/any/any: luat II.2.2 da loai han, khong nhac lai
+        if _side_all(ri.source, src_ranges, wide=False) and \
+           _side_all(ri.dest, dst_ranges, wide=False) and \
+           _is_exactly_scoped(ri.source, src_ranges) and \
+           _is_exactly_scoped(ri.dest, dst_ranges) and \
+           _scope_trustworthy(ri.source) and _scope_trustworthy(ri.dest):
+            return ri.rule.name
+    return None
+
+
+def _tag_zone_verdict(res: RowResult, *args, **kwargs) -> RowResult:
+    """Gan RowResult.zone_verdict/_unknown_detail theo rule ma dong nay tro tói.
+
+    Lop BAO CAO - viec CHAN da lam trong _scan_all_tiers (bien `zone_blocked`).
+    Dat o day de khong phai sua 8 diem `return` cua _classify_row_core."""
+    rule = res.rule or res.nearest_rule
+    zone_lookup = kwargs.get('zone_lookup')
+    if zone_lookup is None and len(args) >= 10:
+        zone_lookup = args[9]
+    if rule is None:
+        return res
+    row = res.row
+    src_ranges = [(t['start'], t['end'], t) for t in row.source_tokens if t['kind'] != 'invalid']
+    dst_ranges = [(t['start'], t['end'], t) for t in row.dest_tokens if t['kind'] != 'invalid']
+    verdict, unknown_detail = _zone_verdict(rule, src_ranges, dst_ranges, zone_lookup or [])
+    res.zone_verdict = verdict
+    res.zone_unknown_detail = unknown_detail
+    # Cong chan zone demote rule xuong nhanh TOP4, nhung cac diem `return` cua
+    # nhanh TOP4 KHONG goi _compute_zone_warning() (truoc gio no chi duoc goi o
+    # TOP1/1.1/2/3) -> dong bi demote hien ten rule ma KHONG NEU LY DO, admin khong
+    # the biet vi sao. Dung cai loi "ban va vo hinh" da bi 1 lan voi
+    # untrusted_scope. Dien o day = 1 cho duy nhat, khong the bo sot nhanh nao.
+    if verdict == ZONE_MISMATCH and not res.zone_warning:
+        res.zone_warning = _compute_zone_warning(rule, src_ranges, dst_ranges,
+                                                 zone_lookup or [])
+    return res
+
+
+def classify_row(*args, **kwargs) -> RowResult:
+    """Vo boc mong quanh _classify_row_core(): giu nguyen 100% luat chon tier, chi
+    gan them 2 field bao cao untrusted_scope (xem _tag_untrusted_scope)."""
+    # Xem dong `classify_row.__wrapped__ = _classify_row_core` o CUOI file: no la
+    # thu bat buoc, khong phai trang tri. tests/test_live_match_skip.py doc
+    # `inspect.signature(classify_row).parameters["max_combos"].default` de khoa cac
+    # nguong Live Match; mot vo boc `*args/**kwargs` TRAN lam mat signature do (da bi
+    # dung 1 lan, test cu bat duoc ngay). __wrapped__ khien inspect.signature() tu
+    # di theo signature THAT cua _classify_row_core.
+    res = _classify_row_core(*args, **kwargs)
+    rule_infos = kwargs.get('rule_infos')
+    if rule_infos is None and len(args) >= 2:
+        rule_infos = args[1]
+    res = _tag_untrusted_scope(res, rule_infos or [])
+    res = _tag_zone_verdict(res, *args, **kwargs)
+    if res.tier not in ('INVALID', 'SAME_SUBNET', 'LIVE_MATCH'):
+        _row = res.row
+        _src = [(t['start'], t['end'], t) for t in _row.source_tokens
+                if t['kind'] != 'invalid']
+        _dst = [(t['start'], t['end'], t) for t in _row.dest_tokens
+                if t['kind'] != 'invalid']
+        res.broad_service_rule = _find_broad_service_rule(rule_infos or [], _src, _dst)
+        res = _tag_blast_radius(res, rule_infos or [])
+        res = _tag_blocking_deny(res, rule_infos or [], _src, _dst)
+    return res
+
+
+def _classify_row_core(
     row: RequestRow,
     rule_infos: List[RuleInfo],
     idx: DeviceIndex,
@@ -1635,3 +2050,9 @@ def classify_row(
                       live_match_skip_reason=live_skip_reason,
                       live_match_skip_detail=live_skip_detail,
                           unparsed_source=bad_src, unparsed_dest=bad_dst)
+
+
+# BAT BUOC (xem chu thich trong classify_row): tra lai signature that cho
+# classify_row de inspect.signature() doc duoc cac default (max_combos...).
+# Phai dat o CUOI file vi _classify_row_core duoc dinh nghia SAU classify_row.
+classify_row.__wrapped__ = _classify_row_core

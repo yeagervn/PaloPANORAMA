@@ -350,10 +350,150 @@ def _compute_action_level(res: RowResult) -> str:
         return 'wide_full_match'
     if needs_add or res.shadow_warning or has_unparsed:
         return 'add'
+    # ZONE (10/2026): zone la dieu kien match BAT BUOC cua PAN-OS. Truoc day ham
+    # nay KHONG HE doc zone_warning/zone_verdict, nen mot dong lech zone van tra
+    # ve 'none' = TO XANH LA "FULL MATCH" du firewall that se chan.
+    if getattr(res, 'zone_verdict', None) == 'mismatch' or res.zone_warning:
+        return 'add'
+    # S5: co rule deny/drop dung TRUOC se khop traffic nay -> khong the la FULL
+    # MATCH dang tin cay (cung tinh than voi shadow_warning da co).
+    if getattr(res, 'blocking_deny_rule', None):
+        return 'add'
     return 'none'
 
 
 def build_name_rule_cell(res: RowResult):
+    """Vo boc quanh _build_name_rule_cell_core(): noi them dong "PHAM VI KHONG DO
+    DUOC" cho MOI nhanh action.
+
+    Vi sao phai boc o day chu khong chen vao tung nhanh: ham core co 8 nhanh
+    `action` va moi nhanh tu `return` rieng. Lan dau tao chen vao 1 nhanh thi dong
+    nay KHONG hien o nhanh 'near_match' - dung cai nhanh ma cong chan
+    _scope_trustworthy() demote xuong, tuc dung cho can noi nhat. Boc 1 lan o ngoai
+    thi khong the bo sot nhanh nao.
+
+    Day la lop BAO CAO: KHONG doi action/mau/ket luan (viec chan da lam o
+    matcher._scope_trustworthy()). Dong TOP1 "khong can lam gi" van xanh la - xem
+    quyet dinh thiet ke o docstring _scope_trustworthy()."""
+    cell, lines = _build_name_rule_cell_core(res)
+    cell, lines = _append_blast_radius(cell, lines, res)
+    cell, lines = _append_blocking_deny(cell, lines, res)
+    cell, lines = _append_broad_service(cell, lines, res)
+    cell, lines = _append_zone_mismatch(cell, lines, res)
+    cell, lines = _append_zone_unknown(cell, lines, res)
+    if not (getattr(res, 'untrusted_scope', False) and res.untrusted_scope_detail):
+        return cell, lines
+    extra = f"\n\u26A0 PHAM VI KHONG DO DUOC: {res.untrusted_scope_detail}"
+    blocks = list(cell)
+    blocks.append(TextBlock(_f(RED_FONT, bold=True), extra))
+    old_text = "".join(getattr(b, 'text', '') or '' for b in cell)
+    return CellRichText(blocks), _estimate_wrapped_lines(old_text + extra,
+                                                          NAME_RULE_COL_CHARS)
+
+
+def _append_blast_radius(cell, lines, res: RowResult):
+    """S4: in HAU QUA cua chinh de xuat "+ ADD" ngay canh de xuat do.
+
+    Mot dong "+ ADD SOURCE" khong chi them 1 IP vao 1 rule: no cap cho IP do quyen
+    di tói TOAN BO Dest cua rule, tren TOAN BO port cua rule. Khong mau nao, canh
+    bao nao doi duoc hanh vi nguoi phe duyet bang viec cho ho thay con so do ngay
+    luc ky."""
+    if not getattr(res, 'blast_radius', None):
+        return cell, lines
+    extra = f"\n\u2192 PHAM VI ANH HUONG: {res.blast_radius}"
+    blocks = list(cell)
+    blocks.append(TextBlock(_f(ZONE_FONT, bold=False), extra))
+    old_text = "".join(getattr(b, 'text', '') or '' for b in cell)
+    return CellRichText(blocks), _estimate_wrapped_lines(old_text + extra,
+                                                          NAME_RULE_COL_CHARS)
+
+
+def _append_blocking_deny(cell, lines, res: RowResult):
+    """S5: rule deny/drop dung TRUOC diem chen se khop traffic nay.
+
+    Cau hoi quyet dinh cua moi request moi thuong khong phai "co rule allow chua"
+    ma "phia tren co deny nao chan truoc khong". Truoc 10/2026, cac dong KHONG chon
+    duoc rule allow nao (TOP4 / "can tao Rule moi") hoan toan khong duoc kiem deny
+    -> admin tao rule moi dat duoi mot deny da khop san roi bao "da them rule ma
+    van khong thong"."""
+    if not getattr(res, 'blocking_deny_detail', None):
+        return cell, lines
+    # P2 (chi co o ban Panorama): deny o Shared-PRE thi KHONG rule nao trong Device
+    # Group dung truoc duoc -> nhan phai noi dung ban chat, khong phai "dat len tren".
+    nhan = ("KHONG THE CAP PHEP TU DEVICE GROUP NAY"
+            if getattr(res, 'blocked_at_shared_pre', False) else "BI CHAN TRUOC")
+    extra = f"\n\u26D4 {nhan}: {res.blocking_deny_detail}"
+    blocks = list(cell)
+    blocks.append(TextBlock(_f(RED_FONT, bold=True), extra))
+    old_text = "".join(getattr(b, 'text', '') or '' for b in cell)
+    return CellRichText(blocks), _estimate_wrapped_lines(old_text + extra,
+                                                          NAME_RULE_COL_CHARS)
+
+
+def _append_broad_service(cell, lines, res: RowResult):
+    """Dong thong tin: "traffic nay THUC TE da duoc phep boi 1 rule Service=any".
+
+    KHONG phai ket luan cua dong (luat II.2.2: rule service=any khong bao gio duoc
+    lam ket qua), nen khong doi action/mau. Nhung im lang thi sai: truoc 10/2026
+    nhanh TOP1.1 khong kiem Service nen tool con di khuyen "+ ADD PORT" vao chinh
+    rule service=any - mot change VO NGHIA, va con lam rule do trong co chu dich
+    khien lan audit sau kho bat hon."""
+    if not getattr(res, 'broad_service_rule', None):
+        return cell, lines
+    extra = (f"\n\u2139 LUU Y: traffic nay THUC TE da duoc phep boi rule "
+             f"'{res.broad_service_rule}' (Service=any, Source/Dest khop dung "
+             f"request). Theo luat, rule qua rong KHONG duoc dung lam ket qua - "
+             f"xem tab CHECK AUDIT (Overly Permissive) de don rule do, va "
+             f"TUYET DOI khong them port vao no (khong co tac dung).")
+    blocks = list(cell)
+    blocks.append(TextBlock(_f(GREY_FONT, italic=True), extra))
+    old_text = "".join(getattr(b, 'text', '') or '' for b in cell)
+    return CellRichText(blocks), _estimate_wrapped_lines(old_text + extra,
+                                                          NAME_RULE_COL_CHARS)
+
+
+def _append_zone_mismatch(cell, lines, res: RowResult):
+    """In ly do "THIEU ZONE" cho CAC NHANH MA CORE KHONG IN.
+
+    _compute_zone_warning() tu truoc gio chi duoc goi o 4 diem return cua
+    TOP1/1.1/2/3. Nhung cong chan zone (10/2026) demote rule lech zone xuong nhanh
+    TOP4 - dung nhanh ma core KHONG in zone_warning - nen dong bi demote hien ten
+    rule MA KHONG NEU LY DO. Admin khong the biet vi sao, va se di tao rule trung
+    thay vi sua zone cua rule da co. Day la lan thu hai dung loi "ban va vo hinh",
+    nen lan nay in o lop ngoai nhu _append_zone_unknown.
+
+    Chan in trung: neu core DA in dong THIEU ZONE roi thi khong in lai."""
+    if not res.zone_warning:
+        return cell, lines
+    old_text = "".join(getattr(b, 'text', '') or '' for b in cell)
+    if "THIEU ZONE" in old_text.upper():
+        return cell, lines
+    extra = f"\n\u26A0 THIEU ZONE: {res.zone_warning}"
+    blocks = list(cell)
+    blocks.append(TextBlock(_f(ZONE_FONT, bold=True), extra))
+    return CellRichText(blocks), _estimate_wrapped_lines(old_text + extra,
+                                                          NAME_RULE_COL_CHARS)
+
+
+def _append_zone_unknown(cell, lines, res: RowResult):
+    """Trang thai ZONE_UNKNOWN truoc day IM LANG hoan toan (coi nhu zone da khop).
+
+    Nay phai noi ro: "chua kiem duoc zone" KHAC "zone da khop". Khong demote tier
+    (xem docstring matcher._zone_verdict) - chi de nguoi doc khong hieu nham rang
+    tool da kiem zone xong roi."""
+    if getattr(res, 'zone_verdict', None) != 'unknown':
+        return cell, lines
+    if not getattr(res, 'zone_unknown_detail', None):
+        return cell, lines
+    extra = f"\n\u2139 CHUA KIEM DUOC ZONE: {res.zone_unknown_detail}"
+    blocks = list(cell)
+    blocks.append(TextBlock(_f(GREY_FONT, italic=True), extra))
+    old_text = "".join(getattr(b, 'text', '') or '' for b in cell)
+    return CellRichText(blocks), _estimate_wrapped_lines(old_text + extra,
+                                                          NAME_RULE_COL_CHARS)
+
+
+def _build_name_rule_cell_core(res: RowResult):
     action = _compute_action_level(res)
 
     if action == 'invalid':

@@ -70,6 +70,33 @@ pyinstaller --onefile --noconsole --name PaloPANORAMASuite PaloPANORAMA_single.p
 
 ---
 
+## Triển khai an toàn: dùng API role CHỈ-ĐỌC (khuyến nghị mạnh)
+
+Chốt **"không bao giờ commit"** ở trên hiện được bảo đảm bởi **code của tool**. Nhưng
+code thì người sau có thể sửa. Cách làm đúng là để **chính PAN-OS** chặn:
+
+1. Trên **Panorama**: **Panorama → Admin Roles** (hoặc Device → Admin Roles cho firewall) → tạo role mới (vd `audit-readonly`).
+2. Trong role đó: **XML API** → bật `Report`, `Log`, `Configuration` (read);
+   **tắt** `Commit`; **tắt** `Operational Requests` nếu không dùng Live Match /
+   Policy Optimizer (2 tính năng đó cần op-command, xem bên dưới).
+3. **Panorama → Administrators** → tạo admin dùng role đó, rồi sinh API key cho **admin
+   này** (không dùng key của `superuser`).
+4. Nhập API key đó vào tool.
+
+Được gì: nếu một ngày nào đó code bị sửa và gọi `commit`, **firewall từ chối** — chốt
+D6 không còn phụ thuộc vào lời hứa của tool. Đây là biện pháp rẻ nhất và có đòn bẩy
+cao nhất trong toàn bộ danh sách khuyến nghị.
+
+**Lưu ý về tải management plane**: Live Match (`test security-policy-match`) và
+Policy Optimizer (`show rule-hit-count`) chạy trên **management plane** — chỗ yếu nhất của PA-3200/5200, và **Panorama còn proxy thêm một chặng** cho mọi
+op-command có `target=` — Panorama thường là con undersize nhất trong estate. Trần số API call đồng thời của toàn tool là
+`LIVE_MATCH_CONCURRENCY` (`check_rule_pan/gui.py`), **mặc định 10** (hạ từ 30 ở bản
+2026-10-26): 30 op-command đồng thời đủ để đẩy mgmt CPU lên cao và làm **chậm
+commit/logging của người khác**. Mỗi call cũng vào mgmt log, nên audit 2000 dòng sẽ
+sinh hàng chục nghìn dòng log API.
+
+---
+
 ## Cây thư mục
 
 ```
@@ -78,7 +105,7 @@ check_ip_pan/     tool #2 — core, pan_api, resolver_engine, matching_engine, e
 check_audit_pan/  tool #3 — core, pan_api, resolver, detectors, excel_io, gui
 tools/
   build_panorama_single.py   nén 3 package → nhúng vào file gộp (idempotent, có --check)
-tests/            243 test khi máy có Tk + Xvfb — unittest, không cần Panorama
+tests/            291 test khi máy có Tk + Xvfb — unittest, không cần Panorama
 testlab/          Panorama GIẢ LẬP + fixture + bộ nghiệm thu 68 ca
 PaloPANORAMA_single.py   bản gộp 1 file (SINH TỰ ĐỘNG — đừng sửa tay)
 PaloPANORAMA_single.md   TÀI LIỆU CHÍNH: PHẦN 0 (delta Panorama) + luật từng tool + nhật ký
@@ -92,12 +119,12 @@ require.md               spec gốc
 ```bash
 # 1. Unit + E2E GUI (không cần Panorama thật)
 # Con số phụ thuộc trình thông dịch — chỉ dòng cuối là nghiệm thu đầy đủ:
-python3.13 -m unittest discover -s tests -q             # 231 test, skipped=5 (3.13 KHÔNG có tkinter)
-python3.12 -m unittest discover -s tests -q             # 231 test, skipped=4 (có tkinter, thiếu $DISPLAY)
-xvfb-run -a python3.12 -m unittest discover -s tests -q # 243 test, 0 skip  ← dùng con số này
+python3.13 -m unittest discover -s tests -q             # 279 test, skipped=5 (3.13 KHÔNG có tkinter)
+python3.12 -m unittest discover -s tests -q             # 279 test, skipped=4 (có tkinter, thiếu $DISPLAY)
+xvfb-run -a python3.12 -m unittest discover -s tests -q # 291 test, 0 skip  ← dùng con số này
 
 # 2. Nghiệm thu toàn bộ tính năng trên Panorama giả lập
-python testlab/run_all_features.py --auto             # 68/68 PASS
+python testlab/run_all_features.py --auto             # 80/80 PASS
 ```
 
 | Tầng | Phủ gì | KHÔNG phủ gì |

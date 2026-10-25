@@ -49,6 +49,11 @@ REQUEST_ROWS = [
      "TOP4 - chua co gi -> can tao Rule moi (do)"),
     ("10.10.10.11, KHONG-PHAI-IP", "192.168.50.21", "1433",
      "TOKEN RAC - phai hien 'KHONG DOC DUOC', khong duoc nuot im lang"),
+    # P2: nam trong dai bi S00-BLOCK-BADNET (Shared-PRE) deny VA khong co rule
+    # allow nao khop -> ket luan phai la "KHONG THE cap phep tu Device Group nay",
+    # vi thu tu lap rap 0.3 khong cho rule nao cua DG dung truoc Shared-PRE.
+    ("10.66.66.88", "192.168.99.99", "6666",
+     "P2 - deny o SHARED-PRE: khong the cap phep tu DG, phai sua Shared-PRE"),
 ]
 
 # LUU Y: o "Danh sach IP can tim" chi nhan IP/range - KHONG co dong ghi chu,

@@ -214,6 +214,14 @@ class AddressObject:
 class AddressGroup:
     name: str
     members: List[str] = field(default_factory=list)
+    # Dynamic Address Group (<dynamic><filter>): thanh vien duoc gan theo TAG luc
+    # runtime (registered-ip), KHONG nam trong file cau hinh. Truoc 10/2026 ham
+    # parse_address_groups() chi doc <static> nen DAG ra members=[] -> resolve ra 0
+    # DIA CHI, khong mot canh bao nao -> _is_exactly_scoped() coi field chua DAG la
+    # "khop chinh xac 1:1 voi request" trong khi thuc te no con cover ca tap tag
+    # (co the hang tram host). Co nay de resolver danh dau unresolved tuong minh.
+    dynamic: bool = False
+    dynamic_filter: str = ''
 
 
 @dataclass
@@ -320,7 +328,14 @@ def parse_address_groups(container) -> Dict[str, AddressGroup]:
         name = e.get('name')
         st = e.find('static')
         members = _members(st) if st is not None else []
-        out[name] = AddressGroup(name, members)
+        dyn = e.find('dynamic')
+        if dyn is not None:
+            filt = dyn.find('filter')
+            out[name] = AddressGroup(
+                name, members, dynamic=True,
+                dynamic_filter=(filt.text or '').strip() if filt is not None else '')
+        else:
+            out[name] = AddressGroup(name, members)
     return out
 
 

@@ -238,7 +238,12 @@ class GroupResolver:
 
         if name in visiting:
             self.log(f"CANH BAO: circular reference tai '{name}' - bo qua")
-            return ResolvedAddr()
+            # Taint (10/2026): truoc day tra ve ResolvedAddr() RONG, nghia la 0 dia
+            # chi va KHONG danh dau gi -> field chua vong lap nay bi coi la
+            # exact-scope. Cau hinh hong thi pham vi that la KHONG XAC DINH.
+            r = ResolvedAddr()
+            r.unresolved.add(name)
+            return r
 
         with self._lock:
             if name in self._cache:
@@ -302,7 +307,18 @@ class GroupResolver:
 
         grp = self.address_groups.get(name)
         if grp is not None:
-            if not grp.members:
+            if getattr(grp, 'dynamic', False):
+                # Dynamic Address Group: thanh vien gan theo tag luc runtime, KHONG
+                # co trong file cau hinh. Phai danh dau unresolved - neu khong thi
+                # DAG = 0 dia chi im lang va lam _is_exactly_scoped() DAT SAI.
+                r.unresolved.add(name)
+                r.member_details.append((name, grp.dynamic_filter or 'dynamic', 'dag'))
+                self.log(f"CANH BAO: address-group '{name}' la DYNAMIC (filter: "
+                         f"{grp.dynamic_filter or 'khong ro'}) - thanh vien gan theo tag "
+                         f"luc runtime, khong doc duoc tu file cau hinh")
+                if not grp.members:
+                    return r
+            elif not grp.members:
                 self.log(f"CANH BAO: address-group '{name}' rong")
             for m in grp.members:
                 sub = self.resolve(m, visiting)

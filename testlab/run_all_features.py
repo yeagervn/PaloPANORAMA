@@ -70,7 +70,8 @@ def tab_check_rule(host, key):
     from check_rule_pan.index import build_device_index, build_zone_lookup
     from check_rule_pan.matcher import build_rule_infos, classify_row, apply_candidate_overlay
     from check_rule_pan.request import parse_request_file
-    from check_rule_pan.exporter import export_results, _compute_action_level
+    from check_rule_pan.exporter import (export_results, _compute_action_level,
+                                          build_name_rule_cell)
 
     xml = fetch_panorama_config_xml(host, key)
     root_el = ET.fromstring(xml)
@@ -171,8 +172,38 @@ def tab_check_rule(host, key):
 
     check("Dong 11: SHADOW boi rule deny o Shared-PRE (dung thu tu lap rap 0.3)",
           results[10].shadow_warning == "S00-BLOCK-BADNET", str(results[10].shadow_warning))
-    check("Dong 10: canh bao THIEU ZONE", bool(results[9].zone_warning),
-          str(results[9].zone_warning)[:60])
+    # Dong 10: KY VONG CU ("phai co zone_warning") da LAC HAU sau cong chan zone
+    # 10/2026 - va cai moi DUNG HON: D03-ZONE-GAP bi loai vi lech zone, tool tim ra
+    # D03B-ZONE-ANY-OK (zone any) la rule THUC SU cho phep luong nay. Doi assert
+    # (khong xoa) y nhu da lam o ban standalone.
+    _r10 = results[9].rule or results[9].nearest_rule
+    check("Dong 10: KHONG chon rule lech zone (D03-ZONE-GAP)",
+          _r10 is not None and _r10.name != "D03-ZONE-GAP", _r10 and _r10.name)
+    check("Dong 10: chon dung rule zone-any lam rule cho phep that",
+          _r10 is not None and _r10.name == "D03B-ZONE-ANY-OK"
+          and results[9].zone_verdict == "match",
+          f"{_r10 and _r10.name} verdict={results[9].zone_verdict}")
+    # --- P2 (10/2026, CHI CO O BAN PANORAMA): deny o Shared-PRE ---
+    # Thu tu lap rap 0.3: Shared-PRE -> DG-chain-PRE -> DG-chain-POST -> Shared-POST.
+    # KHONG rule nao trong Device Group co the dung TRUOC Shared-PRE, nghia la "them
+    # rule moi vao DG" o truong hop nay la VO NGHIA o moi vi tri. Ket luan dung phai
+    # la "phai sua Shared-PRE" - do la thong tin ma khong phien ban standalone nao
+    # can, va la gia tri rieng cua ban Panorama.
+    _r16, _a16 = row_of(15)
+    check("Dong 16: P2 - nhan dien deny nam o SHARED-PRE",
+          _r16.blocking_deny_rule == "S00-BLOCK-BADNET" and _r16.blocked_at_shared_pre,
+          f"deny={_r16.blocking_deny_rule} shared_pre={_r16.blocked_at_shared_pre}")
+    check("Dong 16: P2 - ket luan la KHONG THE cap phep tu Device Group nay",
+          "KHONG THE cap phep" in (_r16.blocking_deny_detail or "")
+          and "Shared-PRE" in (_r16.blocking_deny_detail or ""),
+          str(_r16.blocking_deny_detail)[:90])
+    _c16 = "".join(getattr(b, "text", "") or ""
+                   for b in build_name_rule_cell(_r16)[0])
+    check("Dong 16: P2 - o Name Rule noi dung ban chat, khong phai 'dat len tren'",
+          "KHONG THE CAP PHEP TU DEVICE GROUP NAY" in _c16.upper()
+          and "phai dat TREN" not in _c16,
+          "nhan rieng cho Shared-PRE")
+
     check("Dong 13: dung CANDIDATE config (khong bao TAO MOI)",
           results[12].used_candidate_rule is not None, str(results[12].used_candidate_rule))
     check("Dong 15: token rac duoc bao cao, khong nuot im lang",
