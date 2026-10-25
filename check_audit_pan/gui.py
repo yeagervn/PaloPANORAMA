@@ -35,7 +35,7 @@ from .pan_api import (
 from .resolver import GroupResolver, ServiceResolver
 from .detectors import (
     find_shadow_rules, find_disabled_rules, find_overly_permissive_rules,
-    find_overly_permissive_by_size,
+    find_overly_permissive_by_size, OVERLY_ADDR_THRESHOLD, OVERLY_PORT_THRESHOLD,
 )
 from .excel_io import export_findings, parse_import_file
 
@@ -144,6 +144,21 @@ class App(ttk.Frame):
         self.ent_unused_threshold = ttk.Spinbox(frm_feat, from_=1, to=3650, width=6,
                                                  textvariable=self.var_unused_threshold)
         self.ent_unused_threshold.pack(side="left", padx=2, pady=4)
+
+        # B8a (10/2026): 2 nguong cua nhanh "Overly Permissive theo VALUE THAT" (S6)
+        # truoc day chi doi duoc qua tham so ham - nguoi dung KHONG tu dieu chinh
+        # duoc tu giao dien, nen con so 1024 mac dinh thanh ra ap cho moi quy mo
+        # mang. Nay dua ra o nhap.
+        ttk.Label(frm_feat, text="Overly: >= dia chi").pack(side="left", padx=(16, 2))
+        self.var_overly_addr = tk.StringVar(value=str(OVERLY_ADDR_THRESHOLD))
+        self.ent_overly_addr = ttk.Spinbox(frm_feat, from_=1, to=16777216, width=9,
+                                            textvariable=self.var_overly_addr)
+        self.ent_overly_addr.pack(side="left", padx=2, pady=4)
+        ttk.Label(frm_feat, text="/ >= port").pack(side="left", padx=(6, 2))
+        self.var_overly_port = tk.StringVar(value=str(OVERLY_PORT_THRESHOLD))
+        self.ent_overly_port = ttk.Spinbox(frm_feat, from_=1, to=65535, width=7,
+                                            textvariable=self.var_overly_port)
+        self.ent_overly_port.pack(side="left", padx=2, pady=4)
 
         # Khung 3 - Hanh dong
         frm_actions = ttk.LabelFrame(self.root, text="3. Hành động")
@@ -332,6 +347,19 @@ class App(ttk.Frame):
             messagebox.showwarning("Ngưỡng không hợp lệ",
                                    "Ngưỡng Unused (ngày) phải là số nguyên dương.")
             return
+        # B8a: doc 2 nguong Overly NGAY TAI DAY (main thread) roi truyen qua
+        # closure - khong duoc doc tk.StringVar tu worker (xem luat Tkinter o
+        # README; da bi dung 1 lan voi req_file_var cua CHECK RULE).
+        try:
+            overly_addr = int(self.var_overly_addr.get().strip())
+            overly_port = int(self.var_overly_port.get().strip())
+            if overly_addr <= 0 or overly_port <= 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning("Ngưỡng không hợp lệ",
+                                   "2 ngưỡng Overly (số địa chỉ / số port) phải là "
+                                   "số nguyên dương.")
+            return
         if self.cancel_event.is_set():
             self.cancel_event.clear()
         self._set_busy(True)
@@ -340,7 +368,7 @@ class App(ttk.Frame):
         self._log(f"Bắt đầu Check Device Group={dg}, tính năng: {', '.join(types)}")
         threading.Thread(target=self._check_worker,
                          args=(dg, self._target_serial, types, self._mgmt_ip, self._api_key,
-                               self._verify_ssl, unused_threshold),
+                               self._verify_ssl, unused_threshold, overly_addr, overly_port),
                          daemon=True).start()
 
     def _hitcount_serials(self, dg_name, target_serial):
@@ -370,7 +398,9 @@ class App(ttk.Frame):
         return serials
 
     def _check_worker(self, dg_name, target_serial, types, mgmt_ip, api_key, verify_ssl,
-                       unused_threshold_days=UNUSED_RULE_THRESHOLD_DAYS):
+                       unused_threshold_days=UNUSED_RULE_THRESHOLD_DAYS,
+                       overly_addr_threshold=OVERLY_ADDR_THRESHOLD,
+                       overly_port_threshold=OVERLY_PORT_THRESHOLD):
         try:
             objs = parse_devicegroup_objects(self.config_root, dg_name)
             rules = assemble_security_rules(self.config_root, dg_name)
@@ -428,7 +458,10 @@ class App(ttk.Frame):
                 # GRP-ALL-SERVERS da nuoi len 400 member, hoac Net_10.0.0.0/8 lam
                 # Source. Nhanh theo VALUE THAT (sau resolve) bat dung dang do; no
                 # BO SUNG, va tu bo qua cac rule nhanh literal-any da bat.
-                _by_size = find_overly_permissive_by_size(rules, resolver, svc_resolver)
+                _by_size = find_overly_permissive_by_size(
+                    rules, resolver, svc_resolver,
+                    addr_threshold=overly_addr_threshold,
+                    port_threshold=overly_port_threshold)
                 findings += _by_size
                 self._log(f"Overly Permissive: "
                           f"{len([f for f in findings if f.check_type == 'overly_permissive'])} finding "

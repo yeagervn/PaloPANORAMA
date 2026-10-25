@@ -1526,6 +1526,17 @@ def _tag_blast_radius(res: RowResult, rule_infos: List[RuleInfo]) -> RowResult:
         side = 'dest'
     elif res.tier == 'TOP1.1':
         side = 'port'
+    elif res.tier == 'LIVE_MATCH':
+        # B8c (10/2026): tu FIX v3, LIVE_MATCH chi can 1 combo allow la dung som nen
+        # report VAN co the con thieu Source/Dest/Port that su - va exporter CO hien
+        # "+ ADD ..." cho nhanh nay. Dong nao co "+ ADD" thi phai co dong hau qua di
+        # kem; truoc day LIVE_MATCH bi bo sot. Suy ben can bo sung tu chinh report.
+        if any(i.status in ('new', 'exists') for i in (res.source_report or [])):
+            side = 'source'
+        elif any(i.status in ('new', 'exists') for i in (res.dest_report or [])):
+            side = 'dest'
+        elif res.missing_ports:
+            side = 'port'
     if side is None:
         return res
     # Khong co gi de "+ ADD" nua (da cover du qua object rong) -> khong noi hau qua
@@ -1536,7 +1547,7 @@ def _tag_blast_radius(res: RowResult, rule_infos: List[RuleInfo]) -> RowResult:
 
 
 def _tag_blocking_deny(res: RowResult, rule_infos: List[RuleInfo],
-                       src_ranges, dst_ranges) -> RowResult:
+                       src_ranges, dst_ranges, zone_lookup=None) -> RowResult:
     """S5: canh bao rule deny/drop dung TRUOC diem chen.
 
     Chi gan khi chua co shadow_warning (shadow_warning la truong hop "da chon duoc
@@ -1554,17 +1565,23 @@ def _tag_blocking_deny(res: RowResult, rule_infos: List[RuleInfo],
     if res.rule is not None:
         return res
     ports = res.row.port_tokens
-    ri = _find_blocking_deny_rule(rule_infos, src_ranges, dst_ranges, ports)
+    ri = _find_blocking_deny_rule(rule_infos, src_ranges, dst_ranges, ports,
+                                   zone_lookup=zone_lookup)
     if ri is None:
         return res
     res.blocking_deny_rule = ri.rule.name
     vi_tri = getattr(ri.rule, 'vi_tri', '') or ''
     if vi_tri == 'Shared-PRE':
-        # P2: khac han ban standalone. Thu tu lap rap 0.3 la
+        # P2 (CHI CO O BAN PANORAMA): thu tu lap rap 0.3 la
         # Shared-PRE -> DG-chain-PRE -> DG-chain-POST -> Shared-POST, nen KHONG rule
         # nao trong Device Group co the dung TRUOC Shared-PRE. "Them rule moi vao DG"
-        # o day la viec VO NGHIA - dong nao cung the. Ket luan dung la phai sua
+        # o day la viec VO NGHIA - dat o dong nao cung the. Ket luan dung la phai sua
         # chinh Shared-PRE, va do thuong KHONG phai quyen cua nguoi quan tri DG nay.
+        #
+        # LUU Y CHO NGUOI BAO TRI: khoi `if/else` nay la DELTA RIENG cua ban
+        # Panorama - ban standalone KHONG co. Moi lan port ham nay tu standalone
+        # sang day PHAI ap lai no, neu khong P2 bi xoa am tham (da bi dung 1 lan o
+        # dot 2026-10-27c, lab bat duoc ngay).
         res.blocked_at_shared_pre = True
         res.blocking_deny_detail = (
             f"rule '{ri.rule.name}' (action={ri.rule.action}) nam o SHARED-PRE va se "
@@ -1646,8 +1663,14 @@ def _blast_radius_text(ri: "RuleInfo", side_added: str,
     cua rule RONG HON request, nhung co 1 member khop 1:1) thi phai noi RO ca hai
     con so - nguoi dung da chap nhan pham vi "DA BIET rong hon" nay, nhung nguoi
     phe duyet van can thay no."""
-    n_src = ri.source.total_address_count()
-    n_dst = ri.dest.total_address_count()
+    # B8b (10/2026): dung union_address_count() - DA KHU TRUNG LAP - thay vi
+    # total_address_count(). Mot field co 2 object chong lan (vd 10.0.0.0/24 va
+    # 10.0.0.5) truoc day bi dem 256 + 1 = 257, trong khi that ra chi 256. Uoc
+    # luong cao hon thi "an toan" cho nguoi phe duyet, nhung mot CON SO SAI lam mat
+    # long tin vao toan bo dong canh bao. union_address_count() da ton tai san
+    # (dung cho exact-scope) va da khu trung lap - chi can dung no.
+    n_src = ri.source.union_address_count()
+    n_dst = ri.dest.union_address_count()
     n_port = _service_port_span(ri.service)
 
     def _n(v):
@@ -1674,7 +1697,7 @@ def _blast_radius_text(ri: "RuleInfo", side_added: str,
 
 
 def _find_blocking_deny_rule(rule_infos: List[RuleInfo], src_ranges, dst_ranges,
-                             ports) -> Optional[RuleInfo]:
+                             ports, zone_lookup=None) -> Optional[RuleInfo]:
     """Rule deny/drop/reset DAU TIEN theo thu tu rulebase se khop traffic nay.
 
     Khac _find_shadowing_rule(): ham do can mot `candidate` da duoc chon va chi xet
@@ -1689,10 +1712,23 @@ def _find_blocking_deny_rule(rule_infos: List[RuleInfo], src_ranges, dst_ranges,
     for ri in rule_infos:
         if ri.rule.disabled or ri.rule.action == 'allow':
             continue
-        if _ports_covered_for_shadow(ri.service, ports) and \
-           _side_all_for_shadow(ri.source, src_ranges) and \
-           _side_all_for_shadow(ri.dest, dst_ranges):
-            return ri
+        if not (_ports_covered_for_shadow(ri.service, ports) and
+                _side_all_for_shadow(ri.source, src_ranges) and
+                _side_all_for_shadow(ri.dest, dst_ranges)):
+            continue
+        # B5 (10/2026): XET CA ZONE. Mot rule deny `trust -> untrust` KHONG he chan
+        # luong di tu `vpn`, nhung truoc day tool van canh bao "BI CHAN TRUOC" vi ham
+        # nay chi xet dia chi + port. Huong sai do AN TOAN (canh bao thua chu khong
+        # bo sot) nhung mot canh bao bi coi la nhieu thi lan sau no THAT cung bi bo
+        # qua - do la cai gia that.
+        # CHI bo qua khi zone duoc xac dinh CHAC CHAN la lech (ZONE_MISMATCH).
+        # ZONE_UNKNOWN thi VAN canh bao: khong biet thi phai canh bao (giu nguyen
+        # huong an toan cua ham nay).
+        if zone_lookup:
+            _zv, _ = _zone_verdict(ri.rule, src_ranges, dst_ranges, zone_lookup)
+            if _zv == ZONE_MISMATCH:
+                continue
+        return ri
     return None
 
 
@@ -1770,7 +1806,10 @@ def classify_row(*args, **kwargs) -> RowResult:
                 if t['kind'] != 'invalid']
         res.broad_service_rule = _find_broad_service_rule(rule_infos or [], _src, _dst)
         res = _tag_blast_radius(res, rule_infos or [])
-        res = _tag_blocking_deny(res, rule_infos or [], _src, _dst)
+        _zl = kwargs.get('zone_lookup')
+        if _zl is None and len(args) >= 10:
+            _zl = args[9]
+        res = _tag_blocking_deny(res, rule_infos or [], _src, _dst, zone_lookup=_zl)
     return res
 
 
