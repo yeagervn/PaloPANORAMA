@@ -60,6 +60,10 @@ REQUEST_ROWS = [
     # B3: rule deny chan cap nay co service la group KHONG resolve duoc
     ("10.10.88.11", "192.168.88.21", "9443",
      "B3 - deny co service khong resolve duoc: PHAI van canh bao bi chan truoc"),
+    # B4: deny o SHARED-POST -> ket luan NGUOC DAU voi P2: them rule vao DG la
+    # giai phap hop le, KHONG can sua Shared
+    ("10.10.44.11", "192.168.44.21", "7443",
+     "B4 - deny o SHARED-POST: them rule vao DG la giai quyet duoc"),
 ]
 
 # LUU Y: o "Danh sach IP can tim" chi nhan IP/range - KHONG co dong ghi chu,

@@ -247,10 +247,66 @@ def tab_check_rule(host, key):
     check("Dong 18: B3 - va vi deny do o Shared-PRE nen ket luan la KHONG THE cap phep",
           _rb3.blocked_at_shared_pre, str(_rb3.blocking_deny_detail)[:70])
 
+    # --- B4 (10/2026): deny o SHARED-POST - DOI XUNG voi P2, ket luan NGUOC DAU ---
+    # Dong 19: moi rule cua Device Group deu duoc danh gia TRUOC Shared-POST, nen
+    # them rule allow vao DG LA GIAI PHAP HOP LE. Neu gop chung nhan voi P2 thi
+    # admin se tuong "bi chan boi Shared = khong lam duoc gi" roi di xin quyen
+    # Panorama mot cach khong can thiet.
+    _rb4, _ab4 = row_of(18)
+    check("Dong 19: B4 - nhan dien deny nam o SHARED-POST",
+          _rb4.blocking_deny_rule == "S98B-DENY-POST" and _rb4.blocked_at_shared_post,
+          f"deny={_rb4.blocking_deny_rule} shared_post={_rb4.blocked_at_shared_post}")
+    check("Dong 19: B4 - ket luan NGUOC DAU voi P2 (them rule vao DG la giai quyet duoc)",
+          "KHONG can sua Shared" in (_rb4.blocking_deny_detail or "")
+          and not _rb4.blocked_at_shared_pre,
+          str(_rb4.blocking_deny_detail)[:80])
+    _cb4 = "".join(getattr(b, "text", "") or ""
+                   for b in build_name_rule_cell(_rb4)[0]).upper()
+    check("Dong 19: B4 - nhan o Name Rule KHAC han P2",
+          "SHARED-POST" in _cb4 and "KHONG THE CAP PHEP TU DEVICE GROUP NAY" not in _cb4,
+          "nhan rieng cho Shared-POST")
+
     check("Dong 13: dung CANDIDATE config (khong bao TAO MOI)",
           results[12].used_candidate_rule is not None, str(results[12].used_candidate_rule))
     check("Dong 15: token rac duoc bao cao, khong nuot im lang",
           results[14].unparsed_source == ["KHONG-PHAI-IP"], str(results[14].unparsed_source))
+
+    # --- B7 (10/2026): rule CUC BO tren chinh firewall (buoc 3 cua 0.3) ---
+    # assemble_security_rules_panorama() co tham so local_rules va vi tri lap rap
+    # dung tu lau, nhung GUI chua co duong nao nap vao nen no VINH VIEN la None ->
+    # mot DENY cuc bo hoan toan VO HINH voi tool.
+    from check_rule_pan.core import parse_local_firewall_rules
+    from check_rule_pan.request import build_manual_request as _bmr
+    _local_path = os.path.join(HERE, "fixtures", "firewall_local_config.xml")
+    _local = parse_local_firewall_rules(_local_path)
+    check("B7 - doc duoc rule cuc bo tu config cua CHINH firewall",
+          [r.name for r in _local] == ["LOCAL-DENY-OPS"]
+          and _local[0].vi_tri == "Local",
+          f"{[(r.name, r.vi_tri) for r in _local]}")
+
+    # Lap rap LAI co local_rules va kiem dung vi tri trong chuoi 0.3
+    _cfg_local = load_pan_config_from_xml_string(xml, DG, SERIAL, local_rules=_local)
+    _thu_tu_local = list(dict.fromkeys(r.vi_tri for r in _cfg_local["rules"]))
+    check("B7 - rule cuc bo duoc lap rap DUNG vi tri (giua DG-PRE va DG-POST)",
+          "Local" in _thu_tu_local
+          and _thu_tu_local.index("Local") > _thu_tu_local.index("DG-HN-PRE")
+          and _thu_tu_local.index("Local") < _thu_tu_local.index("DG-HN-POST"),
+          " -> ".join(_thu_tu_local))
+
+    # Va DENY cuc bo phai duoc canh bao - truoc B7 no vo hinh
+    _ris_local = build_rule_infos(_cfg_local["rules"], GroupResolver(
+        _cfg_local["address_objects"], _cfg_local["address_groups"]), ServiceResolver(
+        _cfg_local["service_objects"], _cfg_local["service_groups"]))
+    _row_local = _bmr([["10.10.55.11", "192.168.55.21", "8888"]]).rows[0]
+    _r_local = classify_row(_row_local, _ris_local, idx, zone_lookup=zl)
+    check("B7 - DENY cuc bo duoc canh bao (truoc B7 no VO HINH voi tool)",
+          _r_local.blocking_deny_rule == "LOCAL-DENY-OPS",
+          f"deny={_r_local.blocking_deny_rule}")
+    # Doi chung: KHONG nap local_rules thi tool khong thay gi
+    _r_khong = classify_row(_row_local, ris, idx, zone_lookup=zl)
+    check("B7 - TAI HIEN: khong nap config firewall thi deny cuc bo VO HINH",
+          _r_khong.blocking_deny_rule is None,
+          f"deny={_r_khong.blocking_deny_rule}")
 
     out = os.path.join(OUT, "check_rule_ket_qua.xlsx")
     export_results(req.headers, results, out)
@@ -356,7 +412,7 @@ def tab_check_ip(host, key):
         root, DG, ips, 20, log_func=lambda m: None,
         progress_cb=lambda *a: None, cancel_event=_th.Event(), registered_ip_tags=tags)
     check("Pipeline tra cuu Security Rule (ca Shared lan chuoi DG, pre+post)",
-          len(rules) == 16 and len(match) > 0,
+          len(rules) == 17 and len(match) > 0,
           f"{len(rules)} rule, {len(match)} IP co ket qua")
     vt = {r.name: r.vi_tri for r in rules}
     check("0.3 - moi rule co nhan 'Vi tri Rule' dung cho",
@@ -411,11 +467,42 @@ def tab_check_audit(host, key):
     root = client.fetch_running_config()
     objs = parse_devicegroup_objects(root, DG)
     rules = assemble_security_rules(root, DG)
-    check("Doc rulebase cho audit (lap rap theo 0.3)", len(rules) == 16, f"{len(rules)} rule")
+    check("Doc rulebase cho audit (lap rap theo 0.3)", len(rules) == 17, f"{len(rules)} rule")
 
     gr = GroupResolver(objs["address_objects"], objs["address_groups"])
     sr = ServiceResolver(objs["service_objects"], objs["service_groups"])
     import logging as _lg
+    # --- B2 (10/2026): rule Shared ap cho MOI firewall Panorama quan ly ---
+    # DG-HN co 2 firewall, nhung Panorama con quan ly cac con khac. Rule o
+    # Shared-PRE/Shared-POST ap cho TAT CA, nen "0 hit tren moi con trong DG" VAN
+    # CHUA DU bang chung -> co the de xuat xoa rule Shared dang chay o DG khac.
+    from check_audit_pan.pan_api import (get_panorama_device_serials,
+                                          devicegroup_device_serials,
+                                          fetch_rule_hit_count_multi)
+    # `_serials` (cac firewall cua DG) duoc tinh o khoi P1 BEN DUOI, nen o day tinh
+    # rieng - khong dua vao thu tu khoi trong file.
+    _serials = devicegroup_device_serials(root, DG)
+    _estate = get_panorama_device_serials(host, key, log_func=lambda m: None)
+    check("B2 - liet ke duoc MOI firewall Panorama quan ly",
+          len(_estate) >= 2 and SERIAL in _estate, str(_estate))
+    _ngoai = [x for x in _estate if x not in _serials]
+    _hits_estate = fetch_rule_hit_count_multi(host, key, _serials,
+                                               log_func=lambda m: None,
+                                               extra_shared_serials=_ngoai)
+    _st_shared = _hits_estate.get(("S10-SHADOWED-NOHIT", "Shared-POST")) \
+        or next((v for k, v in _hits_estate.items()
+                 if str(k[1]).startswith("Shared-")), None)
+    check("B2 - rule o pham vi Shared co bang chung tu DU cac firewall can kiem",
+          _st_shared is not None
+          and set(_st_shared.devices_seen) >= set(_serials),
+          str(_st_shared and _st_shared.evidence_scope)[:90])
+    _st_dg = next((v for k, v in _hits_estate.items()
+                   if str(k[1]).startswith("DG-")), None)
+    check("B2 - rule trong Device Group KHONG doi hoi bang chung tu firewall ngoai DG",
+          _st_dg is not None and _st_dg.hits_known
+          and all(x in _serials for x in _st_dg.devices_seen),
+          str(_st_dg and _st_dg.evidence_scope)[:90])
+
     # --- P1 (10/2026): UNUSED phai 0 hit tren MOI firewall cua Device Group ---
     # So sanh TRUC TIEP 2 cach doc tren cung 1 rule (H04-DUNG-O-FW2-NOHIT1):
     #   - doc rieng serial 001122334455 -> 0 hit -> ket luan UNUSED (CACH CU, NGUY HIEM)

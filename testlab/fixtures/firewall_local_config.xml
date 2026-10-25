@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<!-- B7 (10/2026): running-config cua CHINH FIREWALL (khong phai Panorama).
+     Dung de kiem buoc 3 cua thu tu lap rap 0.3: "rule cau hinh cuc bo tren chinh
+     firewall" - Panorama KHONG quan ly va KHONG doc duoc nhung rule nay.
+     Truoc B7, GUI khong co duong nao nap file nay nen local_rules VINH VIEN la
+     None -> mot rule allow (hoac DENY) cuc bo hoan toan VO HINH voi tool. -->
+<config>
+  <devices><entry name="localhost.localdomain">
+    <vsys><entry name="vsys1">
+      <rulebase><security><rules>
+        <!-- DENY cuc bo: chan dung cap ma khong rule nao cua Panorama chan -->
+        <entry name="LOCAL-DENY-OPS">
+          <from><member>any</member></from><to><member>any</member></to>
+          <source><member>10.10.55.11</member></source>
+          <destination><member>192.168.55.21</member></destination>
+          <service><member>any</member></service><application><member>any</member></application>
+          <action>deny</action>
+        </entry>
+      </rules></security></rulebase>
+    </entry></vsys>
+  </entry></devices>
+</config>

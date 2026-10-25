@@ -417,6 +417,51 @@ def _parse_security_rules_from_rules_el(rules_el, vi_tri: str, rulebase: str,
     return out
 
 
+def parse_local_firewall_rules(path: str) -> List[SecurityRule]:
+    """B7 (10/2026): doc rule CUC BO tu running-config cua CHINH FIREWALL.
+
+    Buoc 3 cua thu tu lap rap 0.3 la "rule cau hinh cuc bo tren chinh firewall" -
+    Panorama KHONG quan ly va KHONG doc duoc nhung rule do.
+    `assemble_security_rules_panorama()` da co tham so `local_rules` va vi tri lap
+    rap dung tu lau, nhung GUI chua co duong nao nap vao nen no VINH VIEN la None.
+    Hau qua: mot rule allow - hoac DENY - cuc bo nam giua DG-PRE va DG-POST hoan
+    toan VO HINH voi tool, nen ket luan co the sai ca 2 huong (bao "chua co rule"
+    trong khi da co, hoac bo sot mot deny cuc bo dang chan).
+
+    File dau vao la running-config cua FIREWALL (khong phai Panorama), nen rulebase
+    nam o `/config/devices/entry/vsys/entry/rulebase/security/rules` - KHONG co
+    pre/post-rulebase (do la khai niem rieng cua Panorama). Gan `vi_tri='Local'`
+    dung nhu nhan ma 0.3 quy dinh.
+
+    Loi doc file / XML sai -> RAISE de GUI bao ro cho nguoi dung (khac voi cac ham
+    parse khac tra [] im lang: o day nguoi dung CHU DONG chon file, nen file sai la
+    thong tin ho can biet ngay, khong duoc nuot).
+    """
+    with open(path, 'r', encoding='utf-8') as f:
+        root = ET.fromstring(f.read())
+    out: List[SecurityRule] = []
+    seen_ids = set()
+    for vsys_el in root.iter('vsys'):
+        for entry in vsys_el.findall('entry'):
+            rb = entry.find('rulebase')
+            if rb is None:
+                continue
+            sec = rb.find('security')
+            if sec is None:
+                continue
+            rules_el = sec.find('rules')
+            if rules_el is None:
+                continue
+            # Dung lai _parse_security_rules_from_rules_el() - KHONG viet lai logic
+            # doc tung truong (viet lai la cach chac chan nhat de 2 duong doc troi
+            # khoi nhau: vd mot ban sua `_members(...) or ['any']` ma ban kia khong).
+            for r in _parse_security_rules_from_rules_el(rules_el, 'Local', 'local', ''):
+                if r.name and r.name not in seen_ids:
+                    seen_ids.add(r.name)
+                    out.append(r)
+    return out
+
+
 def parse_security_rules_in(container, vi_tri: str, rulebase: str,
                             dg: str = '') -> List[SecurityRule]:
     """Doc 1 pre-rulebase HOAC post-rulebase cua 1 container (phan tu <shared> hoac
@@ -945,9 +990,14 @@ def load_pan_config(xml_path: str, dg_name: Optional[str] = None,
 
 
 def load_pan_config_from_xml_string(xml_text: str, dg_name: Optional[str] = None,
-                                     target_serial: Optional[str] = None):
+                                     target_serial: Optional[str] = None,
+                                     local_rules: Optional[List[SecurityRule]] = None):
+    """B7 (10/2026): them `local_rules` - rule cau hinh CUC BO tren chinh firewall
+    (buoc 3 cua thu tu lap rap 0.3). parse_config_root() va
+    assemble_security_rules_panorama() da nhan tham so nay tu lau nhung ham nay
+    khong truyen qua, nen GUI khong co duong nao nap vao."""
     root = ET.fromstring(xml_text)
-    return parse_config_root(root, dg_name, target_serial)
+    return parse_config_root(root, dg_name, target_serial, local_rules=local_rules)
 
 
 def _api_error_message(root) -> str:

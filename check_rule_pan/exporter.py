@@ -420,8 +420,14 @@ def _append_blocking_deny(cell, lines, res: RowResult):
         return cell, lines
     # P2 (chi co o ban Panorama): deny o Shared-PRE thi KHONG rule nao trong Device
     # Group dung truoc duoc -> nhan phai noi dung ban chat, khong phai "dat len tren".
-    nhan = ("KHONG THE CAP PHEP TU DEVICE GROUP NAY"
-            if getattr(res, 'blocked_at_shared_pre', False) else "BI CHAN TRUOC")
+    if getattr(res, 'blocked_at_shared_pre', False):
+        nhan = "KHONG THE CAP PHEP TU DEVICE GROUP NAY"
+    elif getattr(res, 'blocked_at_shared_post', False):
+        # B4: nguoc dau voi P2 - o day THEM RULE VAO DG LA GIAI PHAP, nen nhan phai
+        # khac han de admin khong di xin quyen Panorama mot cach khong can thiet.
+        nhan = "BI CHAN O SHARED-POST (them rule vao Device Group la giai quyet duoc)"
+    else:
+        nhan = "BI CHAN TRUOC"
     extra = f"\n\u26D4 {nhan}: {res.blocking_deny_detail}"
     blocks = list(cell)
     blocks.append(TextBlock(_f(RED_FONT, bold=True), extra))

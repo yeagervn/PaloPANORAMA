@@ -36,6 +36,15 @@
       </entry>
     </rules></security></pre-rulebase>
     <post-rulebase><security><rules>
+      <!-- B4: deny o SHARED-POST. DOI XUNG voi P2 nhung ket luan NGUOC DAU: moi
+           rule cua Device Group deu duoc danh gia TRUOC Shared-POST, nen them rule
+           allow vao DG LA GIAI PHAP HOP LE - khac han P2 (vo nghia). -->
+      <entry name="S98B-DENY-POST">
+        <from><member>any</member></from><to><member>any</member></to>
+        <source><member>HOST-B4-SRC</member></source><destination><member>HOST-B4-DST</member></destination>
+        <service><member>any</member></service><application><member>any</member></application>
+        <action>deny</action>
+      </entry>
       <entry name="S99-ANY-ANY-ANY">
         <from><member>any</member></from><to><member>any</member></to>
         <source><member>any</member></source><destination><member>any</member></destination>
@@ -143,6 +152,9 @@
           <!-- B3: cap dia chi rieng cho ca "service cua rule deny KHONG resolve duoc" -->
           <entry name="HOST-B3-SRC"><ip-netmask>10.10.88.11/32</ip-netmask></entry>
           <entry name="HOST-B3-DST"><ip-netmask>192.168.88.21/32</ip-netmask></entry>
+          <!-- B4: cap dia chi rieng cho ca deny o SHARED-POST -->
+          <entry name="HOST-B4-SRC"><ip-netmask>10.10.44.11/32</ip-netmask></entry>
+          <entry name="HOST-B4-DST"><ip-netmask>192.168.44.21/32</ip-netmask></entry>
           <entry name="FQDN-UPDATE"><fqdn>updates.example.com</fqdn></entry>
         </address>
         <address-group>

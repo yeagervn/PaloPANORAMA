@@ -136,6 +136,13 @@ class RowResult:
     # TRUOC Shared-PRE - nghia la viec "them rule moi vao DG" KHONG BAO GIO giai
     # quyet duoc truong hop nay. Ket luan dung phai la "phai sua Shared-PRE".
     blocked_at_shared_pre: bool = False
+    # B4 (10/2026) - truong hop DOI XUNG cua P2. Rule deny chan traffic nay nam o
+    # `Shared-POST`. Thu tu lap rap 0.3: Shared-PRE -> DG-PRE -> DG-POST ->
+    # Shared-POST, nen moi rule cua Device Group ĐỀU dung TRUOC Shared-POST. Nghia
+    # la: them rule allow vao DG **VAN GIAI QUYET DUOC** (khac han P2) - nhung chi
+    # khi dat o DG-PRE/DG-POST, va rule do phai khop TRUOC. Day la thong tin HUU
+    # DUNG, nguoc dau voi P2, nen phai noi rieng chu khong duoc gop chung mot nhan.
+    blocked_at_shared_post: bool = False
 
 
 # =========================================================================
@@ -1589,6 +1596,18 @@ def _tag_blocking_deny(res: RowResult, rule_infos: List[RuleInfo],
             f"tu Device Group nay - them rule moi vao DG se KHONG co tac dung o bat "
             f"ky vi tri nao. Phai sua chinh rule o Shared-PRE (thuong can quyen quan "
             f"tri Panorama cap cao hon).")
+    elif vi_tri == 'Shared-POST':
+        # B4: DOI XUNG voi P2 va KET LUAN NGUOC DAU - moi rule cua Device Group deu
+        # dung TRUOC Shared-POST, nen them rule allow vao DG LA GIAI PHAP HOP LE
+        # (khong giong P2 vo nghia). Phai noi ro dieu do, neu khong admin se tuong
+        # "bi chan boi Shared thi coi nhu khong lam duoc gi" roi di xin quyen
+        # Panorama mot cach khong can thiet.
+        res.blocked_at_shared_post = True
+        res.blocking_deny_detail = (
+            f"rule '{ri.rule.name}' (action={ri.rule.action}) nam o SHARED-POST. Moi "
+            f"rule cua Device Group deu duoc danh gia TRUOC no, nen chi can them "
+            f"rule allow vao Device Group nay (Pre hoac Post-rulebase) la giai quyet "
+            f"duoc - KHONG can sua Shared.")
     else:
         res.blocking_deny_detail = (
             f"rule '{ri.rule.name}' (action={ri.rule.action}, vi tri {vi_tri or '?'}, "

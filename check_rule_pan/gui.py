@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 import xml.etree.ElementTree as ET
 
 from .core import (fetch_panorama_config_xml, load_pan_config_from_xml_string,
+                    parse_local_firewall_rules,
                     configure_live_match_concurrency, fetch_candidate_config_xml,
                     parse_candidate_config, diff_candidate_config,
                     get_panorama_devicegroups, get_panorama_devices,
@@ -136,6 +137,26 @@ class PANOSCheckerGUI(ttk.Frame):
         self.lbl_target_hint = ttk.Label(config_frame, text="(trống = bỏ qua Live Match / Zone)",
                                           foreground="#666666")
         self.lbl_target_hint.grid(row=3, column=2, sticky="w", padx=5)
+
+        # B7 (10/2026): O NAP RULE CUC BO TREN FIREWALL.
+        # Buoc 3 cua thu tu lap rap 0.3 la "rule cau hinh CUC BO tren chinh
+        # firewall" - Panorama KHONG quan ly va KHONG doc duoc nhung rule do.
+        # `assemble_security_rules_panorama()` da co tham so `local_rules` va vi tri
+        # lap rap dung tu lau, nhung GUI chua co duong nao nap vao nen no VINH VIEN
+        # la None. Hau qua: mot rule allow (hoac DENY) cuc bo nam giua DG-PRE va
+        # DG-POST hoan toan vo hinh voi tool -> ket luan co the sai ca 2 huong.
+        ttk.Label(config_frame, text="Config firewall (rule cục bộ):").grid(
+            row=4, column=0, sticky="w", padx=5, pady=2)
+        self.local_cfg_var = tk.StringVar()
+        ttk.Entry(config_frame, textvariable=self.local_cfg_var, width=40).grid(
+            row=4, column=1, sticky="w", padx=5)
+        ttk.Button(config_frame, text="Chọn...",
+                   command=self._pick_local_config).grid(row=4, column=2, padx=5)
+        ttk.Label(config_frame,
+                  text="(tùy chọn - running-config .xml lấy từ CHÍNH firewall; "
+                       "trống = bỏ qua rule cục bộ)",
+                  foreground="#666666").grid(row=5, column=1, columnspan=2,
+                                              sticky="w", padx=5)
 
         # Cho phep nhan Enter tren 2 o Management IP / API Key de chay Load Config
         # ngay, khong bat buoc phai click chuot vao nut - thuan tien khi go xong la
@@ -437,6 +458,15 @@ class PANOSCheckerGUI(ttk.Frame):
             self._log(f"Đã đổi Device Group sang '{self.dg_var.get()}' - đang nạp lại cấu hình...")
             self._start_load_config()
 
+    def _pick_local_config(self):
+        """B7: chon file running-config .xml lay tu CHINH firewall (khong phai
+        Panorama) de doc rule cuc bo."""
+        path = filedialog.askopenfilename(
+            title="Chọn running-config .xml của FIREWALL (không phải Panorama)",
+            filetypes=[("XML Config", "*.xml"), ("All Files", "*.*")])
+        if path:
+            self.local_cfg_var.set(path)
+
     def _start_load_config(self):
         mgmt_ip = self.mgmt_ip_var.get().strip()
         api_key = self.api_key_var.get().strip()
@@ -445,6 +475,9 @@ class PANOSCheckerGUI(ttk.Frame):
             return
         dg_wanted = self.dg_var.get().strip() or None
         target_serial = self._normalize_serial(self.target_serial_var.get()) or None
+        # B7: doc duong dan NGAY TAI DAY (main thread). Doc tk.StringVar tu worker
+        # la loi da tung lam mat trang ca luot chay (req_file_var) - xem XIV.
+        local_cfg_path = self.local_cfg_var.get().strip()
 
         def _worker():
             self._log(f"Đang đăng nhập và đọc config từ PANORAMA {mgmt_ip} qua API...")
@@ -482,7 +515,24 @@ class PANOSCheckerGUI(ttk.Frame):
                 except Exception:
                     pass
 
-                cfg = load_pan_config_from_xml_string(xml_text, dg_name, target_serial)
+                # B7: nap rule CUC BO tu file config cua chinh firewall (neu co).
+                # Loi doc file -> canh bao ro va di tiep voi local_rules=None (dung
+                # nguyen tac "Continue, not Crash"), KHONG duoc im lang.
+                local_rules = None
+                if local_cfg_path:
+                    try:
+                        local_rules = parse_local_firewall_rules(local_cfg_path)
+                        self._log(f"Đã nạp {len(local_rules)} rule CỤC BỘ từ "
+                                  f"{os.path.basename(local_cfg_path)} - sẽ được lắp "
+                                  f"ráp vào giữa DG-PRE và DG-POST (bước 3 của 0.3).")
+                    except Exception as e:
+                        self._log(f"CANH BAO: không đọc được rule cục bộ từ "
+                                  f"{local_cfg_path} ({e}) → bỏ qua, kết quả sẽ KHÔNG "
+                                  f"xét rule cấu hình trực tiếp trên firewall.")
+                        local_rules = None
+
+                cfg = load_pan_config_from_xml_string(xml_text, dg_name, target_serial,
+                                                       local_rules=local_rules)
 
                 group_resolver = GroupResolver(cfg['address_objects'], cfg['address_groups'])
                 svc_resolver = ServiceResolver(cfg['service_objects'], cfg['service_groups'])

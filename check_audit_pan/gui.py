@@ -30,7 +30,7 @@ from .pan_api import (
     PanApiClient, get_devicegroup_list, parse_devicegroup_objects,
     assemble_security_rules, delete_rule_candidate, disable_rule_candidate,
     fetch_rule_hit_count, fetch_rule_hit_count_multi, fetch_current_rule_states,
-    devicegroup_device_serials,
+    devicegroup_device_serials, get_panorama_device_serials,
 )
 from .resolver import GroupResolver, ServiceResolver
 from .detectors import (
@@ -422,9 +422,26 @@ class App(ttk.Frame):
                     if len(_serials) == 1:
                         self._log("LƯU Ý: chỉ có 1 firewall trong phạm vi → kết luận "
                                   "UNUSED chỉ có giá trị cho đúng firewall đó.")
-                    hit_stats = fetch_rule_hit_count_multi(mgmt_ip, api_key, _serials,
+                    # B2 (10/2026): rule o Shared-PRE/Shared-POST ap cho MOI
+                    # firewall Panorama quan ly, khong chi cac con trong DG nay -
+                    # nen voi rule Shared, "0 hit tren moi con trong DG" VAN CHUA
+                    # DU bang chung. Lay them danh sach toan estate; voi cac con
+                    # NGOAI DG chi hoi 2 lenh pham vi <shared> (xem
+                    # fetch_rule_hit_count(only_shared=True)), nen chi phi la
+                    # 4 x N_trong_DG + 2 x N_ngoai_DG.
+                    _estate = get_panorama_device_serials(mgmt_ip, api_key,
                                                            verify_ssl=verify_ssl,
                                                            log_func=self._log)
+                    _ngoai_dg = [x for x in _estate if x not in _serials]
+                    if _ngoai_dg:
+                        self._log(f"Có {len(_ngoai_dg)} firewall KHÁC ngoài Device "
+                                  f"Group → hỏi thêm 2 lệnh phạm vi Shared trên "
+                                  f"từng con để kết luận UNUSED cho rule Shared "
+                                  f"được đúng: {', '.join(_ngoai_dg)}")
+                    hit_stats = fetch_rule_hit_count_multi(mgmt_ip, api_key, _serials,
+                                                           verify_ssl=verify_ssl,
+                                                           log_func=self._log,
+                                                           extra_shared_serials=_ngoai_dg)
                     _thieu = sum(1 for st in hit_stats.values()
                                  if not getattr(st, "hits_known", True))
                     self._log(f"Hit-count OK ({len(hit_stats)} rule có dữ liệu thống kê)"

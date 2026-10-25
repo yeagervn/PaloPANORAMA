@@ -168,7 +168,8 @@ class PanApiClient:
             )
         return True
 
-    def fetch_rule_hit_count_multi(self, serials, log_func=None):
+    def fetch_rule_hit_count_multi(self, serials, log_func=None,
+                                   extra_shared_serials=None):
         """P1 (10/2026): doc hit-count tren **MOI firewall** duoc truyen vao roi GOP.
 
         Vi sao bat buoc: hit-count la so lieu cua TUNG firewall, nhung 1 rule trong
@@ -192,6 +193,15 @@ class PanApiClient:
         """
         log = log_func or (lambda msg: None)
         serials = [x for x in dict.fromkeys(serials or []) if x]
+        # B2 (10/2026): rule o Shared-PRE/Shared-POST ap cho **MOI** firewall
+        # Panorama quan ly, khong chi cac con trong Device Group dang chon. Nen voi
+        # rule Shared, "0 hit tren moi con trong DG" VAN CHUA DU bang chung.
+        # Cach lam de dung ma khong no chi phi API: voi cac con NGOAI DG, chi hoi 2
+        # lenh pham vi <shared> (khong hoi 2 lenh device-group) - xem
+        # fetch_rule_hit_count(only_shared=True).
+        #   Chi phi = 4 x N_trong_DG + 2 x N_ngoai_DG  (toi thieu de ket luan dung)
+        extra_shared = [x for x in dict.fromkeys(extra_shared_serials or [])
+                        if x and x not in serials]
         if not serials:
             log("CANH BAO: khong xac dinh duoc firewall nao de doc Rule Hit Count "
                 "(can Target Firewall hoac Device Group co thiet bi) - bo qua nhanh UNUSED.")
@@ -199,9 +209,11 @@ class PanApiClient:
 
         per_device = {}
         failed = []
-        for ser in serials:
+        for ser, chi_shared in ([(x, False) for x in serials]
+                                + [(x, True) for x in extra_shared]):
             try:
-                per_device[ser] = self.fetch_rule_hit_count(ser, log_func=log_func)
+                per_device[ser] = self.fetch_rule_hit_count(ser, log_func=log_func,
+                                                             only_shared=chi_shared)
             except Exception as e:       # pragma: no cover - fetch da tu boc try
                 failed.append(ser)
                 log(f"CANH BAO: khong doc duoc hit-count tu firewall {ser} ({e}) - "
@@ -222,7 +234,15 @@ class PanApiClient:
             last_ts = None
             created_ts = None
             seen, missing = [], []
-            for ser in serials:
+            # B2: PHAM VI BANG CHUNG phu thuoc vi tri cua rule.
+            #   - rule Shared-PRE/Shared-POST: ap cho MOI firewall -> phai co bang
+            #     chung tu CA cac con ngoai DG
+            #   - rule trong Device Group: chi ap cho cac con cua DG -> chi can
+            #     bang chung tu `serials`
+            _vi_tri = key[1] if isinstance(key, tuple) and len(key) > 1 else ''
+            _can_kiem = (serials + extra_shared) if str(_vi_tri).startswith('Shared-') \
+                else serials
+            for ser in _can_kiem:
                 st = per_device.get(ser, {}).get(key)
                 if st is None:
                     missing.append(ser)
@@ -252,7 +272,8 @@ class PanApiClient:
                if n_khong_du else ""))
         return result
 
-    def fetch_rule_hit_count(self, target_serial: str, log_func=None) -> Dict[Tuple[str, str], RuleHitStat]:
+    def fetch_rule_hit_count(self, target_serial: str, log_func=None,
+                             only_shared: bool = False) -> Dict[Tuple[str, str], RuleHitStat]:
         """
         Best-effort (0.7/D10): doc thong ke hit-count cua TOAN BO Security Rule tren
         Target Firewall (Policy Optimizer). BAT BUOC co target_serial; thieu -> tra {}
@@ -301,6 +322,12 @@ class PanApiClient:
              "<post-rulebase><entry name='security'><rules><all/></rules></entry></post-rulebase>"
              "</shared></rule-hit-count></show>"),
         ]
+        if only_shared:
+            # B2 (10/2026): voi firewall NGOAI Device Group dang chon, ta chi can
+            # bang chung cho rule o pham vi Shared (Shared-PRE/Shared-POST) - vi
+            # chi rule Shared moi ap cho chung. Bo 2 lenh device-group di: chi phi
+            # cho moi con ngoai DG giam tu 4 lenh xuong 2.
+            scopes = [t for t in scopes if t[0] == 'shared']
         for scope_label, rb, cmd in scopes:
             try:
                 root = self._request({"type": "op", "cmd": cmd, "target": target_serial})
@@ -927,14 +954,51 @@ def fetch_rule_hit_count(panorama_ip: str, api_key: str, target_serial: str,
     return client.fetch_rule_hit_count(target_serial, log_func=log_func)
 
 
+def get_panorama_device_serials(panorama_ip: str, api_key: str,
+                                verify_ssl: bool = False, log_func=None):
+    """B2 (10/2026): serial cua MOI firewall Panorama dang quan ly.
+
+    Dung de xac dinh pham vi bang chung cho rule o `Shared-PRE`/`Shared-POST` -
+    nhung rule do ap cho MOI firewall, khong chi cac con trong Device Group dang
+    chon, nen "0 hit tren moi con trong DG" VAN CHUA DU de ket luan UNUSED.
+
+    Viet RIENG o day (khong import tu check_rule_pan) vi 3 package cua suite doc
+    lap 100% - co tests/test_panorama_infra.py::test_3_package_khong_import_lan_nhau
+    khoa lai. Loi/khong ho tro -> tra [] va log canh bao; luc do rule Shared se
+    thieu bang chung -> khong ket luan UNUSED (dung huong an toan)."""
+    log = log_func or (lambda msg: None)
+    client = PanApiClient(panorama_ip, api_key, verify_ssl=verify_ssl)
+    try:
+        root = client._request({"type": "op",
+                                "cmd": "<show><devices><all/></devices></show>"})
+    except Exception as e:
+        log(f"CANH BAO: khong liet ke duoc cac firewall Panorama quan ly ({e}) - "
+            f"rule o pham vi Shared se THIEU bang chung nen KHONG duoc ket luan UNUSED.")
+        return []
+    out = []
+    for e in root.iter("entry"):
+        sn = e.findtext("serial") or e.get("name")
+        if sn and sn.strip() and sn.strip() not in out:
+            out.append(sn.strip())
+    return out
+
+
 def fetch_rule_hit_count_multi(panorama_ip: str, api_key: str, serials,
-                               verify_ssl: bool = False, log_func=None):
-    """P1 (10/2026): hit-count GOP tren moi firewall cua Device Group.
+                               verify_ssl: bool = False, log_func=None,
+                               extra_shared_serials=None):
+    """P1 + B2 (10/2026): hit-count GOP tren moi firewall can kiem.
+
+    `serials`               = cac firewall cua Device Group dang chon (hoi du 4 lenh)
+    `extra_shared_serials`  = cac firewall KHAC ma Panorama quan ly (chi hoi 2 lenh
+                              pham vi <shared>) - bat buoc de ket luan UNUSED cho
+                              rule o Shared-PRE/Shared-POST, vi rule do ap cho MOI
+                              firewall chu khong chi cac con trong DG.
 
     Dung ham nay thay cho fetch_rule_hit_count() o moi noi ket luan UNUSED. Xem
     PanApiClient.fetch_rule_hit_count_multi() va RuleHitStat.hits_known."""
     client = PanApiClient(panorama_ip, api_key, verify_ssl=verify_ssl)
-    return client.fetch_rule_hit_count_multi(serials, log_func=log_func)
+    return client.fetch_rule_hit_count_multi(
+        serials, log_func=log_func, extra_shared_serials=extra_shared_serials)
 
 
 def fetch_current_rule_states(panorama_ip: str, api_key: str, verify_ssl: bool = False, log_func=None) -> Optional[Dict[Tuple[str, str], dict]]:
