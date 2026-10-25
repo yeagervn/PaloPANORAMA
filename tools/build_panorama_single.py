@@ -97,9 +97,70 @@ def _open_imports_block():
     return _OPEN_IMPORTS_HEADER + body
 
 
+def _replace(text, old, new, done_if=None):
+    """Thay dung 1 lan, idempotent.
+
+    `done_if` la DAU HIEU BEN VUNG cho biet buoc nay da duoc ap dung roi (1
+    chuoi hoac nhieu chuoi - co bat ky cai nao la coi nhu xong). Can no vi
+    logic `main` (build_app/on_close/APP_TITLE) CHI ton tai trong file single;
+    neu chi so sanh y nguyen chuoi `new` thi 1 ban sua tay hop le se lam build
+    no AssertionError du buoc migrate da xong tu lau.
+    """
+    markers = done_if if isinstance(done_if, (tuple, list)) else (done_if or new,)
+    if any(m in text for m in markers):
+        return text
+    count = text.count(old)
+    if count != 1:
+        raise AssertionError(
+            f"Anchored {old!r} xuat hien {count} lan (can DUNG 1). "
+            f"{TARGET.name} co the da doi - kiem tra lai tools/build_panorama_single.py.")
+    return text.replace(old, new)
+
+
+def _migrate_main(text: str) -> str:
+    """Cac thay doi o phan `main` cua file single, sinh TU DONG (khong sua tay).
+
+    M1. on_close() phai shutdown CA 3 tab. Truoc day chi shutdown CHECK IP +
+        CHECK AUDIT vi CHECK RULE khong co cancel_event. Nhung worker cua CHECK
+        RULE van cham vao Tk sau khi cua so bi destroy ->
+        RuntimeError("main thread is not in main loop"). Nay ca 3 tab deu co
+        shutdown() nen gom lai 1 vong for.
+    """
+    text = _replace(
+        text,
+        "        # Huy moi tac vu Search/Connect dang chay o tab CHECK IP (co\n"
+        "        # cancel_event, dung threading) truoc khi dong cua so - tab CHECK\n"
+        "        # RULE khong dung co che cancel_event nen khong can xu ly gi them.\n",
+        "        # Huy moi tac vu dang chay o CA 3 tab truoc khi destroy cua so. Tab\n"
+        "        # nao con worker thread cham vao widget sau khi destroy se nem\n"
+        "        # RuntimeError(\"main thread is not in main loop\") - nen CA 3 tab\n"
+        "        # deu phai co shutdown() va deu phai duoc goi o day.\n",
+        done_if="deu phai co shutdown() va deu phai duoc goi o day")
+
+    text = _replace(
+        text,
+        "        try:\n"
+        "            tab_check_ip.shutdown()\n"
+        "        except Exception:\n"
+        "            pass\n"
+        "        try:\n"
+        "            tab_check_audit.shutdown()\n"
+        "        except Exception:\n"
+        "            pass\n"
+        "        root.destroy()",
+        "        for tab in (tab_check_rule, tab_check_ip, tab_check_audit):\n"
+        "            try:\n"
+        "                tab.shutdown()\n"
+        "            except Exception:\n"
+        "                pass\n"
+        "        root.destroy()",
+        done_if="for tab in (tab_check_rule, tab_check_ip, tab_check_audit)")
+    return text
+
+
 def _rendered() -> str:
     """Noi dung file single DUNG RA phai co, tinh tu source 3 package hien tai."""
-    text = TARGET.read_text(encoding="utf-8")
+    text = _migrate_main(TARGET.read_text(encoding="utf-8"))
 
     # 1) Sinh lai khoi "import lo thien" (quet AST 3 package).
     anchor = text.find('# KHOI IMPORT "LO THIEN"')

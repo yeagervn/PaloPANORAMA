@@ -36,13 +36,16 @@ class App(ttk.Frame):
 
         self.msg_queue: "queue.Queue" = queue.Queue()
         self.cancel_event = threading.Event()
+        # Cua so dang dong -> dung vong _poll_queue (xem shutdown()).
+        self._closing = False
+        self._poll_after_id = None
         self.api_client: Optional[PanApiClient] = None
         self.config_root: Optional[ET.Element] = None
         self.registered_ip_tags: Dict[str, Set[str]] = {}
 
         self._build_ui()
         self._on_toggle_nat()  # khoi tao dung noi dung label IP theo che do mac dinh (No/Search)
-        self.root.after(100, self._poll_queue)
+        self._poll_after_id = self.root.after(100, self._poll_queue)
         # WM_DELETE_WINDOW chi ton tai o Toplevel/Tk, KHONG ap dung duoc cho Frame
         # nua - viec xu ly dong cua so chinh (bao gom huy tac vu dang chay cua tab
         # nay qua self.shutdown()) gio do NOI GOI cap cao nhat (main.py) chiu
@@ -244,6 +247,10 @@ class App(ttk.Frame):
     def _log(self, msg: str):
         self.msg_queue.put(("log", msg))
 
+    def _set_status(self, text: str):
+        """An toan goi tu worker thread: xep yeu cau doi dong trang thai."""
+        self.msg_queue.put(("status", text))
+
     def _set_progress(self, phase: str, done: int, total: int):
         self.msg_queue.put(("progress", (phase, done, total)))
 
@@ -257,6 +264,12 @@ class App(ttk.Frame):
                     self.txt_log.insert("end", payload + "\n")
                     self.txt_log.see("end")
                     self.txt_log.configure(state="disabled")
+                elif kind == "status":
+                    # Doi dong chu trang thai. Worker thread PHAI di duong nay,
+                    # khong duoc goi thang self.lbl_progress.config() - Tkinter
+                    # khong thread-safe, va khi mainloop da thoat thi no nem
+                    # RuntimeError("main thread is not in main loop").
+                    self.lbl_progress.config(text=payload)
                 elif kind == "progress":
                     phase, done, total = payload
                     pct = int(done / total * 100) if total else 0
@@ -273,7 +286,10 @@ class App(ttk.Frame):
         except queue.Empty:
             pass
         self._refresh_plan_hint()
-        self.root.after(100, self._poll_queue)
+        if self._closing:
+            self._poll_after_id = None
+            return
+        self._poll_after_id = self.root.after(100, self._poll_queue)
 
     # ------------------------------------------------------------- connect
     def _on_connect(self):
@@ -412,7 +428,7 @@ class App(ttk.Frame):
 
             nat_is_csv = (plan["nat_format"] == "csv")
             if rule_data and nat_data and not nat_is_csv:
-                self.lbl_progress.config(text="Exporting Excel (Rule + NAT, 1 file 2 sheet)...")
+                self._set_status("Exporting Excel (Rule + NAT, 1 file 2 sheet)...")
                 output_paths.append(export_combined_to_excel(
                     OUTPUT_DIR,
                     rules=rule_data["rules"],
@@ -434,16 +450,15 @@ class App(ttk.Frame):
                     self._log("[NAT] Dinh dang CSV khong gop duoc vao file Excel 2 sheet "
                               "-> xuat rieng 2 file (chon 'xlsx' o muc 4 neu muon gop chung).")
                 if rule_data:
-                    self.lbl_progress.config(text="Exporting Excel (Rule)...")
+                    self._set_status("Exporting Excel (Rule)...")
                     output_paths.append(export_to_excel(
                         OUTPUT_DIR, rule_data["rules"], rule_data["match_results"],
                         rule_data["resolver"], rule_data["service_objects"],
                         rule_data["service_groups"],
                         log_entries=rule_data["log_entries"], log_func=self._log))
                 if nat_data:
-                    self.lbl_progress.config(
-                        text="Exporting bang NAT ({}, {})...".format(
-                            "Full" if plan["nat_mode_full"] else "Search", plan["nat_format"]))
+                    self._set_status("Exporting bang NAT ({}, {})...".format(
+                        "Full" if plan["nat_mode_full"] else "Search", plan["nat_format"]))
                     exporter = export_nat_to_csv if nat_is_csv else export_nat_to_excel
                     output_paths.append(exporter(
                         OUTPUT_DIR, nat_data["nat_rules"], nat_data["resolver"],
@@ -516,7 +531,7 @@ class App(ttk.Frame):
         if self.cancel_event.is_set():
             return None
 
-        self.lbl_progress.config(text="Dang doc bang NAT...")
+        self._set_status("Dang doc bang NAT...")
         nat_rules, resolver, nat_service_objects, nat_service_groups = run_nat_export_pipeline(
             self.config_root, dg_name,
             log_func=self._log,
@@ -588,7 +603,14 @@ class App(ttk.Frame):
         nhiem cua main.py, vi tab nay chi la 1 phan cua cua so chung voi tab
         CHECK RULE). Thay the cho _on_close() ban goc (truoc day tu bind vao
         root.protocol khi con la tk.Tk rieng)."""
+        self._closing = True
         self.cancel_event.set()
+        if self._poll_after_id is not None:
+            try:
+                self.root.after_cancel(self._poll_after_id)
+            except Exception:
+                pass
+            self._poll_after_id = None
 
 
 if __name__ == "__main__":

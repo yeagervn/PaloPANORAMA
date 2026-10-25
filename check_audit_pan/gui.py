@@ -68,6 +68,9 @@ class App(ttk.Frame):
 
         self.msg_queue: "queue.Queue" = queue.Queue()
         self.cancel_event = threading.Event()
+        # Cua so dang dong -> dung vong _poll_queue (xem shutdown()).
+        self._closing = False
+        self._poll_after_id = None
 
         self.api_client: Optional[PanApiClient] = None
         self.config_root = None
@@ -85,7 +88,7 @@ class App(ttk.Frame):
         self._import_eligible = False
 
         self._build_ui()
-        self.root.after(100, self._poll_queue)
+        self._poll_after_id = self.root.after(100, self._poll_queue)
         self._log(f"San sang. Thu muc output: {OUTPUT_DIR}")
 
     # ------------------------------------------------------------------ UI
@@ -232,7 +235,10 @@ class App(ttk.Frame):
                     self._set_busy(False)
         except queue.Empty:
             pass
-        self.root.after(100, self._poll_queue)
+        if self._closing:
+            self._poll_after_id = None
+            return
+        self._poll_after_id = self.root.after(100, self._poll_queue)
 
     def _set_busy(self, busy: bool):
         self.btn_connect.config(state="disabled" if busy else "normal")
@@ -798,7 +804,14 @@ class App(ttk.Frame):
     def shutdown(self):
         """Goi khi CUA SO CHINH cua Suite dang dong lai - CHI huy cac tac vu
         dang chay (set cancel_event), KHONG tu destroy() gi ca."""
+        self._closing = True
         self.cancel_event.set()
+        if self._poll_after_id is not None:
+            try:
+                self.root.after_cancel(self._poll_after_id)
+            except Exception:
+                pass
+            self._poll_after_id = None
 
 
 def _build_service_info_from(service_objects, service_groups):

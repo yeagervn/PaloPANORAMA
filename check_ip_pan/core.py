@@ -182,7 +182,14 @@ def setup_logger(log_path: str) -> logging.Logger:
     """Ghi log.txt: moi dong co timestamp. Khong crash neu khong the tao file log."""
     logger = logging.getLogger(APP_NAME)
     logger.setLevel(logging.INFO)
-    logger.handlers.clear()
+    # Dong handler cu TRUOC khi bo di, neu khong file log cua lan setup
+    # truoc bi giu mo (ro file descriptor khi goi setup_logger nhieu lan).
+    for _h in list(logger.handlers):
+        logger.removeHandler(_h)
+        try:
+            _h.close()
+        except Exception:
+            pass
     try:
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         fh = logging.FileHandler(log_path, encoding="utf-8")

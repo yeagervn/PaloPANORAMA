@@ -21,12 +21,12 @@
 
 | | |
 |---|---|
-| **Cập nhật lúc** | 2026-10-20 |
+| **Cập nhật lúc** | 2026-10-25 |
 | **Repo / branch** | `yeagervn/PaloPANORAMA` — branch **`main`** (bản này được lấy làm main) |
-| **Commit HEAD** | `d2b3aa8` |
-| **Sản phẩm chính** | `PaloPANORAMA_single.py` (bản gộp 1 file, SHA256 `290f0125b1d14f05238ad29ea1d678862adc5b540fb3eaaf81ef3252e4cb4adb`, 250874 ký tự, nhúng 22 file py) |
+| **Commit HEAD** | xem commit mới nhất trên nhánh làm việc (bản gộp định danh bằng SHA256 bên dưới) |
+| **Sản phẩm chính** | `PaloPANORAMA_single.py` (bản gộp 1 file, SHA256 `bfef091f007f50786e3b7d8226c34433c466b05d356b79479cec3febe170f435`, 253161 ký tự, nhúng 22 file py) |
 | **Sinh lại bản gộp** | `python tools/build_panorama_single.py` — kiểm tra lệch: `--check` (exit 1 nếu lệch), idempotent |
-| **Bộ test chung** | `python -m unittest discover -s tests -q` → **221 test, OK (skipped=1)** |
+| **Bộ test chung** | `python -m unittest discover -s tests -q` → **224 test, OK (skipped=5)**; trên máy CÓ Tk (`xvfb-run python3.12 -m unittest discover -s tests -q`) → **236 test, OK, 0 skip** |
 | **Nghiệm thu trên Panorama giả lập** | `python testlab/run_all_features.py --auto` → **68/68 PASS** (xem PHẦN VI) |
 | **3 package** | `check_rule_pan/`, `check_ip_pan/`, `check_audit_pan/` — độc lập 100% về code/namespace/output/log |
 
@@ -37,11 +37,12 @@
 
 | Hạng mục | Trạng thái | Bằng chứng |
 |---|---|---|
-| Luật nghiệp vụ 3 tool — **giữ nguyên 100%** so với bản Firewall standalone | **Đã kiểm chứng** | 221 test, trong đó port nguyên 9 bộ test nghiệp vụ của bản standalone + differential ngẫu nhiên |
+| Luật nghiệp vụ 3 tool — **giữ nguyên 100%** so với bản Firewall standalone | **Đã kiểm chứng** | 224 test, trong đó port nguyên 9 bộ test nghiệp vụ của bản standalone + differential ngẫu nhiên |
 | 8 điểm đặc thù Panorama 0.1 → 0.8 (chuỗi DG, thừa kế object, lắp ráp 6 bước, candidate, Live Match/Zone/hit-count cần `target`, xpath ghi theo DG) | **Đã kiểm chứng** | `tests/test_panorama_infra.py` (36 test) + **68/68** ca nghiệm thu lab |
 | Lớp gọi API thật (HTTPS, op-command, parse phản hồi, lệnh ghi candidate) | **Đã kiểm chứng trên Panorama GIẢ LẬP** | `testlab/run_all_features.py --auto` |
 | Bản gộp 1 file | **Đã kiểm chứng** | build idempotent + SHA256 ở trên; giải nén zip nhúng, import lại 9 module logic từ bộ nhớ, xác nhận bản nhúng **không cũ hơn** source |
-| **GUI thật (vẽ widget, bấm nút)** | **CHƯA** | container không có `python3-tk`; 3 `gui.py` chỉ có `py_compile` + gọi trực tiếp hàm worker. `testlab/README.md` mục 2 ghi sẵn thông số (`127.0.0.1:8443`, DG `DG-HN`, target `001122334455`) |
+| **GUI thật — lái hết luồng nghiệp vụ qua giao diện, CẢ 3 TAB** | **Đã kiểm chứng (headless)** | 3 file E2E lái thật giao diện trên **Panorama giả lập của testlab**: `tests/test_gui_e2e_check_rule.py` (Load Config → nhập tay → Check → chạy file mẫu → sinh đúng 1 `Result_*.xlsx` cạnh file input → đóng cửa sổ giữa chừng), `test_gui_e2e_check_ip.py` (Connect → chọn DG-HN → dán IP → Check/Export → Excel 2 sheet; ca để trống; ca Cancel), `test_gui_e2e_check_audit.py` (Connect → tick cả 3 detector → Check → Export; ca bỏ tick hết; ca D6 không bao giờ gọi commit) |
+| **GUI thật — nhìn bố cục trên Windows** | **CHƯA** | mọi kiểm chứng headless qua Xvfb trên Linux. `testlab/README.md` mục 2 ghi sẵn thông số (`127.0.0.1:8443`, DG `DG-HN`, target `001122334455`) |
 | **Chạy với Panorama THẬT** | **CHƯA** | cần 1 lần chạy **chỉ đọc** (không bấm Import) trên Panorama thật trước khi phát hành |
 | Schema `<shared>` của `show rule-hit-count` | **CHƯA xác nhận trên thiết bị thật** | để **best-effort có chủ đích**: Panorama từ chối → log cảnh báo + đi tiếp, rule trong DG vẫn đủ hit-count; kịch bản bị từ chối đã có 1 ca trong lab |
 | Rule **cục bộ trên firewall** (0.3 bước 3) | **Chưa có đường nạp** | hàm đọc + vị trí lắp ráp đã đúng, nhưng GUI chưa có ô nạp file config firewall → mặc định `local_rules=None` |
@@ -792,6 +793,19 @@ hổng thật của sản phẩm** (hit-count bỏ sót phạm vi Shared) — kh
 ---
 
 # PHẦN XIV — NHẬT KÝ THAY ĐỔI GẦN NHẤT
+
+- **[2026-10-25a] CẢ 3 TAB: worker thread chạm thẳng vào Tkinter — Export NAT hỏng, Load Config hỏng, chế độ "Chọn file" mất trắng lượt chạy** (`check_rule_pan/gui.py`, `check_ip_pan/gui.py`, `check_audit_pan/gui.py`, `check_ip_pan/core.py`, `check_audit_pan/core.py`, `tools/build_panorama_single.py`, 4 file test mới):
+  - **Lỗi — Tkinter không thread-safe, nhưng 11 chỗ trong 3 tab gọi thẳng từ worker thread.** Phát hiện bằng cách lái thật giao diện trên Panorama giả lập (thứ mà bảng "đã kiểm chứng" trước đây ghi là **CHƯA**). Ba triệu chứng thật, tái hiện 100%:
+    1. `check_ip_pan` — bấm Check/Export có bật mục 4 → `"Da xay ra loi khong xac dinh"`. 4 chỗ gọi `self.lbl_progress.config()` trong `_run_all_worker()`/`_run_nat_pipeline()`.
+    2. `check_rule_pan` — **Load Config luôn thất bại**: `self.cmb_dg['values'] = dg_list`, `self.cmb_target['values'] = [...]` (phép gán `__setitem__` → `configure()`) và `self.dg_var.set(...)` đều chạy trong worker.
+    3. `check_rule_pan` — chế độ **"Chọn file" không bao giờ sinh file kết quả**: `self.req_file_var.get()` đọc `tk.StringVar` từ worker, nổ **đúng lúc chuẩn bị xuất Excel**, tức sau khi đã tốn toàn bộ thời gian quét rulebase.
+  - **Vì sao bộ test cũ không bắt được.** `testlab/run_all_features.py` gọi **thẳng các hàm pipeline**, không đi qua tầng GUI — nên **68/68 vẫn PASS** trong khi 3 luồng trên hỏng hoàn toàn với người dùng thật.
+  - **Đã sửa thế nào.** `check_rule_pan`: thêm `_ui_queue` + `_ui(func)` (cùng cơ chế `_log_queue` đã có), `cancel_event`/`_closing`/`shutdown()` đúng chữ ký 2 tab kia, đọc `req_file_var` một lần trên main thread rồi truyền qua closure, dừng sớm khi `cancel_event` bật. `check_ip_pan`: thêm message `status` + `_set_status()` vào `_poll_queue`. Cả `check_ip_pan` lẫn `check_audit_pan`: `_poll_after_id` + `shutdown()` huỷ vòng `after` đang treo. Cả 2 `core.py`: đóng log handler trước khi bỏ (rò file descriptor). `tools/build_panorama_single.py`: thêm `_replace(..., done_if=...)` + `_migrate_main()` để **chính build** sinh ra `on_close()` gọi `shutdown()` cho cả 3 tab — **không sửa tay** `PaloPANORAMA_single.py`, đúng quy tắc V.3 bước 1.
+  - **Lưới chặn tái phạm (`tests/test_gui_thread_safety.py`).** Bộ quét AST đi **đệ quy** từ hàm `target=` của `threading.Thread` sang mọi hàm nó gọi, giữ **danh sách** hàm thay vì dict (nhiều hàm lồng nhau trùng tên `_worker` — dùng dict chỉ giữ cái cuối, bỏ lọt hết phần còn lại), và bắt 4 dạng: gọi `messagebox/filedialog`, gọi `self.after()`, gọi method đổi/đọc widget (`config/insert/get/set/cget...`), và **phép gán `self.<widget>[...] = ...`**. Chỉ tính thuộc tính đặt tên theo quy ước widget của 3 tab để không báo nhầm dict thường như `self.rule_by_key[k] = v`.
+  - **Thêm E2E GUI cho cả 3 tab** (`test_gui_e2e_check_rule.py` 4 ca, `test_gui_e2e_check_ip.py` 3 ca, `test_gui_e2e_check_audit.py` 3 ca) lái thật giao diện trên Panorama giả lập. Mọi test tự dọn file sinh ra.
+  - **Cố tình KHÔNG đổi.** Không đụng một dòng luật nghiệp vụ nào của cả 3 tool, không đụng 8 điểm đặc thù Panorama (0.1 → 0.8), không đổi bố cục giao diện. Hộp thoại vẫn hiện đúng như cũ — chỉ khác là hiện từ main thread.
+  - **Bằng chứng đo thật.** `python -m unittest discover -s tests -q` → **224 test, OK (skipped=5)**; máy có Tk → **236 test, OK, 0 skip**. `testlab/run_all_features.py --auto` → **68/68 PASS**. Bản gộp SHA256 `bfef091f007f50786e3b7d8226c34433c466b05d356b79479cec3febe170f435`, 253161 ký tự, build idempotent. Kiểm chứng ngược cho từng lớp lỗi: trả lại `self.cmb_dg['values'] = ...` → test đỏ đúng dòng đó; vá xong → xanh.
+  - **CHƯA làm / hạn chế còn lại.** (1) Chưa ai nhìn bố cục GUI trên Windows thật — toàn bộ headless qua Xvfb trên Linux. (2) Chưa chạy với Panorama THẬT. (3) E2E gọi đúng handler mà nút bấm gọi, chưa mô phỏng click ở mức toạ độ pixel. (4) Không thêm ca vào `testlab/` vì lỗi nằm ở tầng GUI, lab không dựng được vòng đời cửa sổ Tk — đã chốt bằng 4 file test ở `tests/`.
 
 > Chỉ liệt kê ngắn gọn. Chi tiết luật nghiệp vụ đã có sẵn ở Phần 0/II/III/IV — không lặp lại.
 > **Quy tắc V.4**: mỗi dòng dưới đây tương ứng 1 commit đồng bộ code + md + single (từ 2026-09-02, single luôn sinh trực tiếp).

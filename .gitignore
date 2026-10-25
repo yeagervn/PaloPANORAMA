@@ -11,3 +11,8 @@ testlab/.journal.log
 # san pham sinh ra khi chay test, khong commit (ten co timestamp -> nhieu rac)
 tests/output_for_review/
 tests/test_full_flow_result.txt
+
+# Thu muc ket qua cua 3 tool khi chay that / chay test E2E GUI - khong commit
+check_rule_pan/output/
+check_ip_pan/output/
+check_audit_pan/output/

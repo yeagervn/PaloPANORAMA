@@ -67,6 +67,16 @@ class PANOSCheckerGUI(ttk.Frame):
         self.full_config_xml = None
         self._tree_edit_entry = None
         self._log_queue = queue.Queue()
+        # Hang doi cac viec PHAI chay tren main thread (mo hop thoai, doi trang
+        # thai widget...). Worker thread CHI duoc day callable vao day, KHONG
+        # duoc dung widget/messagebox truc tiep - Tkinter khong thread-safe.
+        self._ui_queue = queue.Queue()
+        # Dat khi cua so Suite dang dong (shutdown) - de worker dung som va de
+        # vong lap _drain_log_queue tu ket thuc, thay vi goi after() tren widget
+        # da bi destroy (gay RuntimeError: main thread is not in main loop).
+        self.cancel_event = threading.Event()
+        self._closing = False
+        self._drain_after_id = None
         # Duong dan thu muc/chua file ket qua CUA LAN CHAY GAN NHAT (mode "file") -
         # dung cho nut "Browse Output" de nguoi dung tu mo lai bang tay bat ky luc nao
         # (khong chi luc vua chay xong tu dong mo 1 lan). None = chua co lan nao xuat
@@ -75,7 +85,7 @@ class PANOSCheckerGUI(ttk.Frame):
         self.last_output_path = None
 
         self._build_ui()
-        self.after(100, self._drain_log_queue)
+        self._drain_after_id = self.after(100, self._drain_log_queue)
 
     def _build_ui(self):
         # 1. Ket noi thiet bi (dang nhap bang API Key, doc thang running-config qua API)
@@ -217,6 +227,34 @@ class PANOSCheckerGUI(ttk.Frame):
         theo lo trong _drain_log_queue()."""
         self._log_queue.put(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n")
 
+    def _ui(self, func):
+        """An toan goi tu worker thread: xep 1 viec de MAIN THREAD chay.
+
+        Dung cho moi thao tac cham vao Tk (messagebox, widget.config...).
+        Khong lam gi neu cua so dang dong - tranh dung vao widget da destroy.
+        """
+        if self._closing:
+            return
+        self._ui_queue.put(func)
+
+    def shutdown(self):
+        """Goi khi CUA SO CHINH cua Suite dang dong lai (WM_DELETE_WINDOW).
+
+        Dong vai tro y het shutdown() cua tab CHECK IP / CHECK AUDIT: huy tac
+        vu dang chay, KHONG tu destroy() gi ca, va dung luon vong
+        _drain_log_queue - neu khong, worker se goi after()/messagebox tren
+        widget da bi destroy va nem RuntimeError("main thread is not in main
+        loop").
+        """
+        self._closing = True
+        self.cancel_event.set()
+        if self._drain_after_id is not None:
+            try:
+                self.after_cancel(self._drain_after_id)
+            except Exception:
+                pass
+            self._drain_after_id = None
+
     def _drain_log_queue(self):
         """Chay tren main thread (qua self.after) - rut het cac dong log dang cho trong
         queue va ghi 1 lan vao widget, thay vi tung dong rieng le -> giam so lan thao tac
@@ -232,7 +270,22 @@ class PANOSCheckerGUI(ttk.Frame):
             self.log_text.insert("end", "".join(pending))
             self.log_text.see("end")
             self.log_text.config(state="disabled")
-        self.after(100, self._drain_log_queue)
+
+        # Cac viec worker thread nho chay ho tren main thread.
+        while True:
+            try:
+                job = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                job()
+            except Exception as exc:
+                self._log(f"Lỗi khi cập nhật giao diện: {exc}")
+
+        if self._closing:
+            self._drain_after_id = None
+            return
+        self._drain_after_id = self.after(100, self._drain_log_queue)
 
     def _toggle_mode(self):
         if self.input_mode_var.get() == "file":
@@ -411,8 +464,11 @@ class PANOSCheckerGUI(ttk.Frame):
                 try:
                     devs = get_panorama_devices(mgmt_ip, api_key)
                     if devs:
-                        self.cmb_target['values'] = [
+                        # widget['values'] = ... la __setitem__ -> configure():
+                        # cung la 1 loi goi vao Tcl, phai day ve main thread.
+                        target_values = [
                             f"{sn}" + (f"  ({hn})" if hn else "") for sn, hn in devs]
+                        self._ui(lambda: self.cmb_target.configure(values=target_values))
                 except Exception:
                     pass
 
@@ -476,8 +532,11 @@ class PANOSCheckerGUI(ttk.Frame):
                 self.candidate_idx = candidate_idx
                 self.dg_used = cfg.get('devicegroup_used')
                 self.dg_devices = cfg.get('devicegroup_devices') or []
-                self.cmb_dg['values'] = dg_list
-                self.dg_var.set(self.dg_used or '')
+                dg_values = list(dg_list)
+                self._ui(lambda: self.cmb_dg.configure(values=dg_values))
+                # tk.StringVar.set() cung la loi goi vao Tcl - day ve main thread.
+                dg_shown = self.dg_used or ''
+                self._ui(lambda: self.dg_var.set(dg_shown))
 
                 chain = cfg.get('devicegroup_chain') or []
                 self._log("Chuỗi thừa kế Device Group (object nạp theo thứ tự này, "
@@ -504,10 +563,12 @@ class PANOSCheckerGUI(ttk.Frame):
                 else:
                     self._log("Không nhập Target Firewall - Live Match và cảnh báo Zone TỰ VÔ HIỆU "
                               "(chỉ chạy thuật toán LOCAL trên config Panorama).")
-                messagebox.showinfo("Thông báo", "Đọc cấu hình từ Panorama thành công!")
+                self._ui(lambda: messagebox.showinfo(
+                    "Thông báo", "Đọc cấu hình từ Panorama thành công!"))
             except Exception as e:
                 self._log(f"Lỗi nạp config: {e}")
-                messagebox.showerror("Lỗi", str(e))
+                msg = str(e)
+                self._ui(lambda: messagebox.showerror("Lỗi", msg))
 
         threading.Thread(target=_worker, daemon=True).start()
 
@@ -521,6 +582,11 @@ class PANOSCheckerGUI(ttk.Frame):
         mode = self.input_mode_var.get()
         mgmt_ip = self.mgmt_ip_var.get().strip()
         api_key = self.api_key_var.get().strip()
+        # Doc duong dan file NGAY TAI DAY (main thread) roi truyen vao worker qua
+        # closure. tk.StringVar.get() cung la 1 loi goi vao Tcl - doc tu worker
+        # thread nem RuntimeError("main thread is not in main loop") dung luc
+        # chuan bi xuat file, tuc mat trang ca luot chay.
+        req_file_path = self.req_file_var.get().strip()
         thread_count = max(MIN_THREADS, min(MAX_THREADS, self.thread_var.get() or DEFAULT_THREADS))
         configure_live_match_concurrency(thread_count)
         # BAN PANORAMA (0.5): doc lai serial tai thoi diem bam Check (nguoi dung co the
@@ -598,6 +664,11 @@ class PANOSCheckerGUI(ttk.Frame):
             with ThreadPoolExecutor(max_workers=workers) as executor:
                 for i, res in executor.map(_process, enumerate(rows)):
                     results[i] = res
+                    # Nguoi dung dong cua so giua chung -> dung ngay, khong xuat
+                    # file dang do va khong dung vao widget nua.
+                    if self.cancel_event.is_set():
+                        self._log("Đã dừng theo yêu cầu (cửa sổ đang đóng).")
+                        return
 
             # XỬ LÝ KẾT QUẢ THEO MODE
             if mode == "manual":
@@ -612,16 +683,14 @@ class PANOSCheckerGUI(ttk.Frame):
                     self._log(msg)
                     summary_lines.append(msg)
 
-                messagebox.showinfo(
-                    "Kết quả Test Policy Match",
-                    "Đã hoàn thành kiểm tra trực tiếp:\n\n" + "\n".join(summary_lines)
-                )
+                body = "Đã hoàn thành kiểm tra trực tiếp:\n\n" + "\n".join(summary_lines)
+                self._ui(lambda: messagebox.showinfo("Kết quả Test Policy Match", body))
 
             else:
                 # ĐỌC FILE: Xuất file Excel và TỰ ĐỘNG MỞ THƯ MỤC
                 self._log("Đang xuất kết quả ra file Excel...")
-                out_dir = os.path.dirname(os.path.abspath(self.req_file_var.get().strip()))
-                input_base = os.path.splitext(os.path.basename(self.req_file_var.get().strip()))[0]
+                out_dir = os.path.dirname(os.path.abspath(req_file_path))
+                input_base = os.path.splitext(os.path.basename(req_file_path))[0]
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 out_path = os.path.join(out_dir, f"Result_{input_base}_{timestamp}.xlsx")
 
@@ -635,17 +704,15 @@ class PANOSCheckerGUI(ttk.Frame):
                 # (dang chay trong worker thread).
                 self.last_output_dir = out_dir
                 self.last_output_path = out_path
-                self.after(0, lambda: self.browse_output_btn.config(state="normal"))
+                self._ui(lambda: self.browse_output_btn.config(state="normal"))
 
                 # Tự động mở thư mục chứa file
                 self._open_path(out_dir)
 
-                messagebox.showinfo(
-                    "PAN-OS Request Checker",
-                    f"ĐÃ HOÀN THÀNH! Tổng cộng: {len(results)} dòng.\n\n"
-                    f"File kết quả:\n{out_path}\n\n"
-                    f"Thư mục chứa file đã được mở."
-                )
+                done_msg = (f"ĐÃ HOÀN THÀNH! Tổng cộng: {len(results)} dòng.\n\n"
+                            f"File kết quả:\n{out_path}\n\n"
+                            f"Thư mục chứa file đã được mở.")
+                self._ui(lambda: messagebox.showinfo("PAN-OS Request Checker", done_msg))
 
         threading.Thread(target=_worker, daemon=True).start()
 
