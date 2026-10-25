@@ -510,6 +510,84 @@ def parse_interface_subnets(root) -> List[Tuple[int, int, int, str]]:
     return out
 
 
+def parse_static_routes(root) -> List[Tuple[int, int, int, str]]:
+    """Static route tu running-config -> [(start_ip, end_ip, prefix_len, interface)].
+
+    VI SAO CAN (B1, 10/2026): truoc day bang tra cuu zone chi duoc dung tu cac
+    subnet GAN TRUC TIEP tren interface. Hau qua tren mang that: moi dia chi khong
+    thuoc nhung subnet do - gan nhu moi dia chi internet, moi site khac, moi nguon
+    nam SAU mot router - deu khong suy duoc zone, nen cong chan zone (S2) chi in
+    "CHUA KIEM DUOC ZONE" roi di tiep, tuc gan nhu VO HIEU. Firewall nao cung co
+    default route, nen trong thuc te phan lon dong roi vao truong hop do.
+
+    Cach PAN-OS lam that: zone cua 1 dia chi do **interface egress theo bang dinh
+    tuyen** quyet dinh, khong phai chi boi subnet gan truc tiep. Mot ky su mang map
+    IP -> zone bang tay cung lam dung vay: tra route longest-prefix -> interface ->
+    zone.
+
+    Xu ly 2 dang route:
+      - co <interface>            -> dung luon interface do
+      - chi co <nexthop><ip-address> -> KHONG doan: tra lai interface rong, de
+        build_zone_lookup() suy tu chinh nexthop (nexthop phai thuoc 1 subnet gan
+        truc tiep). Khong suy duoc thi BO QUA route do.
+
+    THIET KE PHONG THU giong parse_interface_subnets(): cau truc XML khac gia dinh
+    thi tra list RONG thay vi loi - zone-lookup tu vo hieu, khong anh huong tinh
+    nang khac.
+
+    HAN CHE phai ghi ro: cach nay sai khi co asymmetric routing hoac
+    policy-based forwarding (PBF) - luc do duong di that khong theo bang dinh tuyen.
+    """
+    out: List[Tuple[int, int, int, str]] = []
+    try:
+        # BAN PANORAMA: trong Template duong dan co THEM 1 tang <config>
+        #   template/entry/config/devices/entry/network
+        # (dung bay da ghi o PHAN 0 muc 2 - ban port tu standalone thieu cho nay nen
+        #  doc ra 0 route, lam B1 vo hieu tren Panorama; da bi dung 1 lan).
+        net = None
+        for path in ('config/devices/entry/network', 'devices/entry/network', 'network'):
+            net = root.find(path)
+            if net is not None:
+                break
+        if net is None:
+            net = next(root.iter('network'), None)
+        if net is None:
+            return out
+        vr_root = net.find('virtual-router')
+        if vr_root is None:
+            vr_root = next(net.iter('virtual-router'), None)
+        if vr_root is None:
+            return out
+        for sr in vr_root.iter('static-route'):
+            for entry in sr.findall('entry'):
+                dest_el = entry.find('destination')
+                if dest_el is None or not (dest_el.text or '').strip():
+                    continue
+                try:
+                    netw = ipaddress.ip_network((dest_el.text or '').strip(),
+                                                strict=False)
+                except ValueError:
+                    continue
+                if netw.version != 4:
+                    continue
+                iface_el = entry.find('interface')
+                iface = (iface_el.text or '').strip() if iface_el is not None else ''
+                if not iface:
+                    # Khong khai interface -> ghi lai NEXTHOP de suy sau. Dung tien
+                    # to 'nexthop:' de build_zone_lookup() phan biet duoc, thay vi
+                    # doan interface o day.
+                    nh = entry.find('nexthop/ip-address')
+                    nh_ip = (nh.text or '').strip() if nh is not None else ''
+                    if not nh_ip:
+                        continue
+                    iface = 'nexthop:' + nh_ip
+                out.append((int(netw.network_address), int(netw.broadcast_address),
+                            netw.prefixlen, iface))
+    except Exception:
+        return []
+    return out
+
+
 def parse_zones(container) -> Dict[str, List[str]]:
     """Tra ve {zone_name: [interface_name, ...]}. Gom ca layer3/layer2/virtual-wire/
     tap (chi layer3 co IP nen chi layer3 thuc su huu ich cho zone-lookup theo IP,
@@ -827,6 +905,12 @@ def parse_config_root(root, dg_name: Optional[str] = None,
     # 0.6 - zone lay tu Template cua Target Firewall (khong co target -> tu vo hieu)
     interface_subnets: List[Tuple[int, int, int, str]] = []
     zones: Dict[str, List[str]] = {}
+    # B1 (10/2026): static route cung lay tu CHINH Template cua Target Firewall -
+    # cung mot nguon voi interface/zone (0.6). Thieu route thi cong chan zone chi
+    # hoat dong voi 2 dau mut nam trong subnet gan truc tiep = gan nhu vo hieu voi
+    # traffic tu ngoai. Khong co Target -> khong co template -> rong, tu vo hieu
+    # im lang y nhu zone (dung nguyen tac 0.6).
+    static_routes: List[Tuple[int, int, int, str]] = []
     template_names: List[str] = []
     for scope in resolve_templates_for_serial(root, target_serial):
         nm = scope.get('name')
@@ -834,6 +918,7 @@ def parse_config_root(root, dg_name: Optional[str] = None,
             template_names.append(nm)
         interface_subnets += parse_interface_subnets(scope)
         zones.update(parse_zones(scope))
+        static_routes += parse_static_routes(scope)
 
     return {
         'devicegroup_list': dg_list,
@@ -847,6 +932,7 @@ def parse_config_root(root, dg_name: Optional[str] = None,
         'rules': rules,
         'zones': zones,
         'interface_subnets': interface_subnets,
+        'static_routes': static_routes,
         'target_serial': target_serial,
         'template_used': template_names,
     }

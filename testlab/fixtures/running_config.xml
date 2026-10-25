@@ -127,6 +127,9 @@
           <entry name="HOST-APP-03"><ip-netmask>10.10.10.13/32</ip-netmask></entry>
           <entry name="HOST-BADNET-50"><ip-netmask>10.66.66.50/32</ip-netmask></entry>
           <entry name="HOST-ONLY-HN"><ip-netmask>10.10.10.99/32</ip-netmask></entry>
+          <!-- B1: nguon tu INTERNET - ngoai MOI subnet interface cua Template -->
+          <entry name="HOST-INET"><ip-netmask>203.0.113.77/32</ip-netmask></entry>
+          <entry name="HOST-B1-DST"><ip-netmask>192.168.50.91/32</ip-netmask></entry>
           <entry name="FQDN-UPDATE"><fqdn>updates.example.com</fqdn></entry>
         </address>
         <address-group>
@@ -157,6 +160,16 @@
             <from><member>trust</member></from><to><member>untrust</member></to>
             <source><member>HOST-ONLY-HN</member></source><destination><member>HOST-DB-01</member></destination>
             <service><member>SVC-ORACLE</member></service><application><member>any</member></application>
+            <action>allow</action>
+          </entry>
+          <!-- [B1] Rule DUY NHAT cover cap nay, doi from=trust. Nguon la dia chi
+                    INTERNET nen zone that (theo default route trong Template) la
+                    'untrust' -> firewall THAT se chan. Truoc B1: khong suy duoc zone
+                    -> verdict unknown -> van la TOP1 xanh la (dung lo hong B1). -->
+          <entry name="H05-B1-TRUST-ONLY">
+            <from><member>trust</member></from><to><member>untrust</member></to>
+            <source><member>HOST-INET</member></source><destination><member>HOST-B1-DST</member></destination>
+            <service><member>SVC-HTTPS</member></service><application><member>any</member></application>
             <action>allow</action>
           </entry>
           <entry name="H03-ALLOW-BADNET-ANYWAY">
@@ -204,7 +217,24 @@
             <entry name="ethernet1/1"><layer3><ip><entry name="10.10.10.1/24"/></ip></layer3></entry>
             <entry name="ethernet1/2"><layer3><ip><entry name="192.168.50.1/24"/></ip></layer3></entry>
             <entry name="ethernet1/3"><layer3><ip><entry name="172.20.0.1/24"/></ip></layer3></entry>
-          </ethernet></interface></network>
+          </ethernet></interface>
+          <!-- B1 (10/2026): virtual-router trong CHINH Template (cung nguon voi
+               interface/zone theo 0.6). Truoc khi co khoi nay, moi dia chi ngoai 3
+               subnet interface deu khong suy duoc zone -> cong chan zone gan nhu vo
+               hieu voi traffic tu ngoai. -->
+          <virtual-router><entry name="default">
+            <routing-table><ip><static-route>
+              <entry name="default-out">
+                <destination>0.0.0.0/0</destination>
+                <interface>ethernet1/2</interface>
+                <nexthop><ip-address>192.168.50.254</ip-address></nexthop>
+              </entry>
+              <entry name="to-branch">
+                <destination>10.77.0.0/16</destination>
+                <nexthop><ip-address>10.10.10.9</ip-address></nexthop>
+              </entry>
+            </static-route></ip></routing-table>
+          </entry></virtual-router></network>
           <vsys><entry name="vsys1"><zone>
             <entry name="trust"><network><layer3><member>ethernet1/1</member></layer3></network></entry>
             <entry name="untrust"><network><layer3><member>ethernet1/2</member></layer3></network></entry>

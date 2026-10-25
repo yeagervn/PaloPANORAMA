@@ -122,8 +122,13 @@ def tab_check_rule(host, key):
     sr = ServiceResolver(cfg["service_objects"], cfg["service_groups"])
     idx = build_device_index(cfg, gr, sr)
     ris = build_rule_infos(cfg["rules"], gr, sr)
-    zl = build_zone_lookup(cfg["interface_subnets"], cfg["zones"])
-    check("0.6 - dung duoc bang tra cuu Zone tu Template", len(zl) == 3, f"{len(zl)} subnet")
+    # B1: lab phai chay DUNG nhu GUI - tuc co truyen static route tu Template.
+    zl = build_zone_lookup(cfg["interface_subnets"], cfg["zones"],
+                            routes=cfg.get("static_routes") or None)
+    # B1: bang nay nay gom CA dai suy tu static route trong Template (3 interface
+    # + 2 route) nen con so dung la 5. Ky vong cu "== 3" la truoc khi co B1.
+    check("0.6 - dung duoc bang tra cuu Zone tu Template (interface + static route)",
+          len(zl) == 5, f"{len(zl)} dai")
 
     cand_ris, cand_idx = [], None
     try:
@@ -203,6 +208,27 @@ def tab_check_rule(host, key):
           "KHONG THE CAP PHEP TU DEVICE GROUP NAY" in _c16.upper()
           and "phai dat TREN" not in _c16,
           "nhan rieng cho Shared-PRE")
+
+    # --- B1 (10/2026): zone suy tu BANG DINH TUYEN trong Template ---
+    # Dong 17: nguon 203.0.113.77 (INTERNET - ngoai MOI subnet interface cua
+    # Template), rule duy nhat cover cap nay doi from=trust. Theo default route
+    # trong Template thi zone that cua nguon la 'untrust' -> firewall THAT se chan.
+    # TAI HIEN lo hong cu NGAY TRONG LAB bang zone_lookup KHONG co route.
+    _zl_khong_route = build_zone_lookup(cfg.get('interface_subnets', []),
+                                         cfg.get('zones', {}))
+    _rb1_cu = classify_row(req.rows[16], ris, idx, zone_lookup=_zl_khong_route)
+    check("Dong 17: B1 - TAI HIEN lo hong cu (khong route -> to xanh la FULL MATCH)",
+          _rb1_cu.tier == "TOP1" and _compute_action_level(_rb1_cu) == "none"
+          and _rb1_cu.zone_verdict == "unknown",
+          f"tier={_rb1_cu.tier} action={_compute_action_level(_rb1_cu)} verdict={_rb1_cu.zone_verdict}")
+    _rb1, _ab1 = row_of(16)
+    check("Dong 17: B1 - co route (tu Template) thi suy duoc zone that va CHAN dung",
+          _rb1.zone_verdict == "mismatch" and _ab1 != "none"
+          and _rb1.tier not in ("TOP1", "TOP1.1", "TOP2", "TOP3"),
+          f"tier={_rb1.tier} action={_ab1} verdict={_rb1.zone_verdict}")
+    check("B1 - static route doc duoc tu Template (co tang <config> thua)",
+          len(cfg.get('static_routes') or []) == 2,
+          f"{len(cfg.get('static_routes') or [])} route")
 
     check("Dong 13: dung CANDIDATE config (khong bao TAO MOI)",
           results[12].used_candidate_rule is not None, str(results[12].used_candidate_rule))
@@ -313,7 +339,7 @@ def tab_check_ip(host, key):
         root, DG, ips, 20, log_func=lambda m: None,
         progress_cb=lambda *a: None, cancel_event=_th.Event(), registered_ip_tags=tags)
     check("Pipeline tra cuu Security Rule (ca Shared lan chuoi DG, pre+post)",
-          len(rules) == 14 and len(match) > 0,
+          len(rules) == 15 and len(match) > 0,
           f"{len(rules)} rule, {len(match)} IP co ket qua")
     vt = {r.name: r.vi_tri for r in rules}
     check("0.3 - moi rule co nhan 'Vi tri Rule' dung cho",
@@ -368,7 +394,7 @@ def tab_check_audit(host, key):
     root = client.fetch_running_config()
     objs = parse_devicegroup_objects(root, DG)
     rules = assemble_security_rules(root, DG)
-    check("Doc rulebase cho audit (lap rap theo 0.3)", len(rules) == 14, f"{len(rules)} rule")
+    check("Doc rulebase cho audit (lap rap theo 0.3)", len(rules) == 15, f"{len(rules)} rule")
 
     gr = GroupResolver(objs["address_objects"], objs["address_groups"])
     sr = ServiceResolver(objs["service_objects"], objs["service_groups"])

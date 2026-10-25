@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import ipaddress
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Optional, Set
 from .resolver import ResolvedAddr, GroupResolver, ServiceResolver
@@ -262,7 +263,9 @@ def find_best_covering_group(ip_set: Set[int], idx: DeviceIndex) -> Optional[Tup
     return (fallback_name, fallback_covered)
 
 def build_zone_lookup(interface_subnets: List[Tuple[int, int, int, str]],
-                       zones: Dict[str, List[str]]) -> List[Tuple[int, int, int, str]]:
+                       zones: Dict[str, List[str]],
+                       routes: Optional[List[Tuple[int, int, int, str]]] = None
+                       ) -> List[Tuple[int, int, int, str]]:
     """Ghep interface_subnets (tu core.parse_interface_subnets) voi zones (tu
     core.parse_zones) thanh 1 bang tra cuu: [(start, end, prefix_len, zone_name), ...],
     sap xep theo prefix_len GIAM DAN (subnet hep nhat/cu the nhat truoc) de tra cuu
@@ -283,6 +286,44 @@ def build_zone_lookup(interface_subnets: List[Tuple[int, int, int, str]],
         zname = iface_to_zone.get(iface)
         if zname:
             out.append((start, end, prefix, zname))
+
+    # B1 (10/2026): NOI THEM cac entry suy tu BANG DINH TUYEN (core.parse_static_routes).
+    #
+    # Vi sao bat buoc: truoc day bang nay chi co subnet GAN TRUC TIEP, nen moi dia chi
+    # nam ngoai chung (gan nhu moi dia chi internet / site khac / nguon sau router)
+    # khong suy duoc zone -> cong chan zone (S2) chi in "CHUA KIEM DUOC ZONE" roi di
+    # tiep = gan nhu vo hieu. PAN-OS quyet dinh zone theo **interface egress trong bang
+    # dinh tuyen**, nen phai dua route vao day.
+    #
+    # KHONG phai doi resolve_zone_for_ip() mot dong nao: list duoc sort theo prefix_len
+    # GIAM DAN, nen mot subnet truc tiep /24 TU DONG thang default route /0 - dung thu
+    # tu uu tien that cua longest-prefix match.
+    if routes:
+        # Dung chinh phan interface truc tiep vua dung o tren de suy nexthop -> interface
+        iface_ranges = sorted(interface_subnets, key=lambda x: -x[2])
+
+        def _iface_of_nexthop(nh_ip: int) -> Optional[str]:
+            for st, en, _pfx, ifc in iface_ranges:
+                if st <= nh_ip <= en:
+                    return ifc
+            return None
+
+        for start, end, prefix, iface in routes:
+            if iface.startswith('nexthop:'):
+                # Route khong khai interface -> suy tu nexthop. Nexthop khong thuoc
+                # subnet truc tiep nao thi BO QUA route (khong doan bua).
+                try:
+                    nh_int = int(ipaddress.ip_address(iface.split(':', 1)[1]))
+                except ValueError:
+                    continue
+                ifc = _iface_of_nexthop(nh_int)
+                if ifc is None:
+                    continue
+                iface = ifc
+            zname = iface_to_zone.get(iface)
+            if zname:
+                out.append((start, end, prefix, zname))
+
     out.sort(key=lambda x: -x[2])
     return out
 

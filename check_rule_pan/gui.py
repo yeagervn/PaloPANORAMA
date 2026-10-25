@@ -491,7 +491,12 @@ class PANOSCheckerGUI(ttk.Frame):
 
                 zone_lookup = []
                 try:
-                    zone_lookup = build_zone_lookup(cfg.get('interface_subnets', []), cfg.get('zones', {}))
+                    # B1 (10/2026): truyen ca static route. Thieu route thi cong chan
+                    # zone chi hoat dong voi 2 dau mut nam trong subnet gan truc tiep -
+                    # tuc gan nhu vo hieu voi traffic tu ngoai.
+                    zone_lookup = build_zone_lookup(cfg.get('interface_subnets', []),
+                                                     cfg.get('zones', {}),
+                                                     routes=cfg.get('static_routes') or None)
                     if zone_lookup:
                         self._log(f"Đã dựng bảng tra cứu Zone từ {len(zone_lookup)} subnet interface trên thiết bị.")
                     else:

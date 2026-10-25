@@ -54,6 +54,9 @@ REQUEST_ROWS = [
     # vi thu tu lap rap 0.3 khong cho rule nao cua DG dung truoc Shared-PRE.
     ("10.66.66.88", "192.168.99.99", "6666",
      "P2 - deny o SHARED-PRE: khong the cap phep tu DG, phai sua Shared-PRE"),
+    # B1: nguon tu internet, rule doi zone trust -> phai chan duoc
+    ("203.0.113.77", "192.168.50.91", "443",
+     "B1 - nguon internet: default route cho ra untrust, rule doi trust -> PHAI chan"),
 ]
 
 # LUU Y: o "Danh sach IP can tim" chi nhan IP/range - KHONG co dong ghi chu,

@@ -15,3 +15,4 @@
 10.99.99.99,192.168.50.99,7777,TOP4 - chua co gi -> can tao Rule moi (do)
 "10.10.10.11, KHONG-PHAI-IP",192.168.50.21,1433,"TOKEN RAC - phai hien 'KHONG DOC DUOC', khong duoc nuot im lang"
 10.66.66.88,192.168.99.99,6666,"P2 - deny o SHARED-PRE: khong the cap phep tu DG, phai sua Shared-PRE"
+203.0.113.77,192.168.50.91,443,"B1 - nguon internet: default route cho ra untrust, rule doi trust -> PHAI chan"
