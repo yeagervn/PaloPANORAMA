@@ -42,7 +42,8 @@ Bản phát hành là **một file duy nhất** `PaloPANORAMA_single.py` — 3 p
 được nén zip và nhúng base64, lúc chạy tự giải mã trong RAM.
 
 ```bash
-python tools/build_panorama_single.py  # sinh lại file gộp từ 3 package
+python tools/build_panorama_single.py          # sinh lại file gộp từ 3 package
+python tools/build_panorama_single.py --check  # KHÔNG ghi gì, chỉ báo lệch: exit 0 = đồng bộ, 1 = source mới hơn
 python -m py_compile PaloPANORAMA_single.py
 pyinstaller --onefile --noconsole --name PaloPANORAMASuite PaloPANORAMA_single.py
 ```
@@ -50,7 +51,9 @@ pyinstaller --onefile --noconsole --name PaloPANORAMASuite PaloPANORAMA_single.p
 > ⚠️ **Không bao giờ sửa tay `PaloPANORAMA_single.py`.** Sửa trong
 > `check_rule_pan/`, `check_ip_pan/`, `check_audit_pan/` rồi build lại. Thay đổi
 > ở phần `main` (vd `on_close`) được đưa vào `_migrate_main()` của builder để
-> file gộp luôn sinh lại được từ đầu.
+> file gộp luôn sinh lại được từ đầu. Trước khi commit, chạy `--check`: nó exit **1**
+> nếu code rời mới hơn bản gộp — đúng lỗi bàn giao làm `.exe` phát hành ra chạy logic CŨ.
+> Chính builder cũng có test riêng: `tests/test_build_panorama_single.py` (7 ca).
 
 ---
 
@@ -74,8 +77,8 @@ check_rule_pan/   tool #1 — core, matcher, resolver, index, request, exporter,
 check_ip_pan/     tool #2 — core, pan_api, resolver_engine, matching_engine, excel_export, gui
 check_audit_pan/  tool #3 — core, pan_api, resolver, detectors, excel_io, gui
 tools/
-  build_panorama_single.py   nén 3 package → nhúng vào file gộp (idempotent)
-tests/            224 test (236 khi máy có Tk) — unittest, không cần Panorama
+  build_panorama_single.py   nén 3 package → nhúng vào file gộp (idempotent, có --check)
+tests/            243 test khi máy có Tk + Xvfb — unittest, không cần Panorama
 testlab/          Panorama GIẢ LẬP + fixture + bộ nghiệm thu 68 ca
 PaloPANORAMA_single.py   bản gộp 1 file (SINH TỰ ĐỘNG — đừng sửa tay)
 PaloPANORAMA_single.md   TÀI LIỆU CHÍNH: PHẦN 0 (delta Panorama) + luật từng tool + nhật ký
@@ -88,8 +91,10 @@ require.md               spec gốc
 
 ```bash
 # 1. Unit + E2E GUI (không cần Panorama thật)
-python -m unittest discover -s tests -q               # 224 test, skip 5 nếu máy không có Tk
-xvfb-run -a python3 -m unittest discover -s tests -q  # 236 test, 0 skip (Linux cần python3-tk)
+# Con số phụ thuộc trình thông dịch — chỉ dòng cuối là nghiệm thu đầy đủ:
+python3.13 -m unittest discover -s tests -q             # 231 test, skipped=5 (3.13 KHÔNG có tkinter)
+python3.12 -m unittest discover -s tests -q             # 231 test, skipped=4 (có tkinter, thiếu $DISPLAY)
+xvfb-run -a python3.12 -m unittest discover -s tests -q # 243 test, 0 skip  ← dùng con số này
 
 # 2. Nghiệm thu toàn bộ tính năng trên Panorama giả lập
 python testlab/run_all_features.py --auto             # 68/68 PASS

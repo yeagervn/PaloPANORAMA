@@ -26,7 +26,7 @@
 | **Commit HEAD** | xem commit mới nhất trên nhánh làm việc (bản gộp định danh bằng SHA256 bên dưới) |
 | **Sản phẩm chính** | `PaloPANORAMA_single.py` (bản gộp 1 file, SHA256 `bfef091f007f50786e3b7d8226c34433c466b05d356b79479cec3febe170f435`, 253161 ký tự, nhúng 22 file py) |
 | **Sinh lại bản gộp** | `python tools/build_panorama_single.py` — kiểm tra lệch: `--check` (exit 1 nếu lệch), idempotent |
-| **Bộ test chung** | `python -m unittest discover -s tests -q` → **231 test, OK (skipped=4)**; trên máy CÓ Tk (`xvfb-run python3.12 -m unittest discover -s tests -q`) → **243 test, OK, 0 skip** |
+| **Bộ test chung** | **Con số phụ thuộc trình thông dịch — phải ghi rõ cái nào:** `python3.13 -m unittest discover -s tests -q` (bản 3.13 trong container **không có tkinter**) → **231 test, OK (skipped=5)**; `python3.12 ...` (có tkinter, **không có `$DISPLAY`**) → **231 test, OK (skipped=4)**; `xvfb-run -a python3.12 -m unittest discover -s tests -q` → **243 test, OK, 0 skip** ← **đây mới là con số nghiệm thu đầy đủ** |
 | **Nghiệm thu trên Panorama giả lập** | `python testlab/run_all_features.py --auto` → **68/68 PASS** (xem PHẦN VI) |
 | **3 package** | `check_rule_pan/`, `check_ip_pan/`, `check_audit_pan/` — độc lập 100% về code/namespace/output/log |
 
@@ -34,6 +34,12 @@
 và 3 file `tests/test_gui_e2e_*.py`): không có `$DISPLAY` thì tự `skipTest("khong co DISPLAY (chay qua xvfb-run)")`.
 Chạy `xvfb-run -a python3.12 -m unittest discover -s tests -q` thì **0 skip** (243 test) — đó mới là
 con số nghiệm thu đầy đủ; 231/skipped=4 chỉ là con số trên máy/CI không có X server.
+Trên `python3.13` (container **không có tkinter**) con số là `231, skipped=**5**`: thêm 1 skip của
+`tests/test_verify_batch.py::test_11` (test này import `check_audit_pan/gui.py`, module đó `import tkinter`).
+**Điểm khác bản standalone — cần biết để không so sánh nhầm:** ở repo này **tổng số test không đổi (231)**
+giữa 3.13 và 3.12, chỉ số skip đổi — nghĩa là **không có module test nào bị `discover` bỏ qua**; bản
+standalone thì mất tới 16 test trên 3.13 vì module đổ ngay khi import. Dù vậy quy ước ghi số là như nhau:
+**mọi con số đều phải kèm tên trình thông dịch**, và chỉ `xvfb-run -a python3.12` được tính là nghiệm thu.
 
 ## Đã kiểm chứng tới đâu (và CHƯA tới đâu)
 
@@ -796,6 +802,15 @@ hổng thật của sản phẩm** (hit-count bỏ sót phạm vi Shared) — kh
 ---
 
 # PHẦN XIV — NHẬT KÝ THAY ĐỔI GẦN NHẤT
+
+- **[2026-10-25c] Tài liệu: số test không ghi rõ trình thông dịch → người đọc có thể tưởng "ít test hơn" trong khi thực tế là "có test không bao giờ chạy"; đồng bộ 3 phát hiện của repo standalone sang đây** (`PaloPANORAMA_single.md`, `README.md` — **không đụng code**):
+  - **Vấn đề.** Mục TÌNH TRẠNG và `README.md` ghi `231 test (skipped=4)` mà không nói chạy bằng trình thông dịch nào. Đo lại cả 3 cách: `python3.13` (bản trong container **không có tkinter**) → `231, skipped=**5**`; `python3.12` (có tkinter, thiếu `$DISPLAY`) → `231, skipped=**4**`; `xvfb-run -a python3.12` → `243, **0 skip**`. Con số cũ trong `README.md` (`224`/`236`) còn là của **trước** entry 2026-10-25b nên đã lạc hậu hẳn.
+  - **Vì sao đáng ghi thành 1 entry riêng.** Cùng lúc rà repo `PaAIO_StandAlone` phát hiện ở đó chênh **189 → 205 = 16 test** giữa 3.13 và 3.12, và **16 test đó không phải bị skip mà KHÔNG ĐƯỢC THU THẬP** (module đổ ngay khi import, `discover` bỏ qua cả module, báo cáo vẫn in `OK`). Đó là kiểu nhầm lẫn nguy hiểm nhất khi đọc báo cáo test: nhìn `OK` tưởng xanh hết, thực ra có cả module chưa từng chạy. **Ở repo Panorama thì không bị**: tổng vẫn **231** trên cả hai bản, chỉ số skip đổi — tức không module nào bị bỏ qua. Nhưng đã đối chiếu thì ghi thẳng cả hai vào tài liệu, kèm lý do, để sau này không ai so hai con số của hai repo rồi kết luận sai.
+  - **Đã sửa.** Mục TÌNH TRẠNG: ghi **cả 3 con số kèm tên trình thông dịch**, nói rõ **chỉ `xvfb-run -a python3.12` (243, 0 skip) được tính là nghiệm thu**, giải thích skip thứ 5 trên 3.13 là `tests/test_verify_batch.py::test_11` (import `check_audit_pan/gui.py`), và ghi rõ điểm khác bản standalone. `README.md`: thay `224`/`236` bằng 3 dòng lệnh có chú thích từng con số; bổ sung `--check` vào khối lệnh build + nhắc chạy nó trước khi commit; nhắc builder nay có test riêng (7 ca).
+  - **Đối chiếu 3 phát hiện của repo standalone sang repo này.** (1) `--check`: repo này **đã có** từ 2026-10-20 — nay chỉ bổ sung vào `README.md` cho người đọc thấy. (2) File sản phẩm bị commit nhầm: `git ls-files | grep output/` → **0 file**, `.gitignore` đã chặn đủ 3 thư mục `*_pan/output/` + `tests/output_for_review/` + `testlab/output/` — **không có gì phải sửa**. (3) Số test thiếu định danh trình thông dịch: **có, đã sửa ở entry này**.
+  - **Cố tình KHÔNG đổi.** Không sửa một dòng code nào — không `check_*_pan/`, không `tools/`, không `tests/`. **SHA256 bản gộp không đổi**: `bfef091f007f50786e3b7d8226c34433c466b05d356b79479cec3febe170f435`, `--check` exit 0.
+  - **Bằng chứng đo thật.** `python3.13 -m unittest discover -s tests -q` → **231 test, OK (skipped=5)**; `python3.12` → **231 test, OK (skipped=4)**; `xvfb-run -a python3.12` → **243 test, OK, 0 skip**; `testlab/run_all_features.py --auto` → **68/68 PASS**; `tools/build_panorama_single.py --check` → exit **0**.
+  - **CHƯA làm / hạn chế còn lại.** (1) Đợt này **chỉ sửa tài liệu**, nên không có ca test/lab nào thêm (lệch bước 5 V.4.1 có chủ đích — không có luật mới nào để chốt). (2) Vẫn **chưa có** pre-commit hook `tools/check_md_sync.py` mà V.4 nhắc tới: `--check` đã sẵn cho hook đó gọi nhưng **chưa ai viết hook**, nên quy tắc "code rời và bản gộp cùng 1 commit" hiện vẫn phụ thuộc người bảo trì tự chạy. (3) Bốn hạn chế lớn **không đổi**: chưa nhìn bố cục GUI trên Windows thật, **chưa chạy với Panorama THẬT**, schema `<shared>` của `rule-hit-count` chưa xác nhận trên thiết bị, rule cục bộ trên firewall chưa có ô nạp trên GUI.
 
 - **[2026-10-25b] Khoá lại chính BỘ SINH bản gộp — `tools/build_panorama_single.py` là mắt xích duy nhất chưa có test, mà nó lại là thứ quyết định file `.exe` chạy đúng hay không** (`tests/test_build_panorama_single.py` — 7 ca mới, không đụng một dòng code sản phẩm):
   - **Vấn đề — nguy cơ, không phải lỗi đã xảy ra.** Quy tắc V.3 bước 1 cấm sửa tay `PaloPANORAMA_single.py`: bản gộp **bắt buộc** do `tools/build_panorama_single.py` sinh ra. Nghĩa là mọi lỗi của chính bộ sinh đều đi thẳng vào sản phẩm phát hành mà **không có lưới nào chặn** — trong khi 231 test còn lại chỉ kiểm chứng *source rời*, không kiểm chứng *cái sinh ra bản gộp*. Đợt 2026-10-25a đã đụng đúng chỗ này: thêm `_replace(..., done_if=...)` + `_migrate_main()` để build tự sinh `on_close()` gọi `shutdown()` cho cả 3 tab. Hai cách hỏng rất thật của kiểu code "vá text theo mốc neo": (a) mốc neo biến mất vì ai đó sửa source → `_replace` **âm thầm không vá gì**, bản gộp thiếu `shutdown()` nhưng build vẫn báo thành công; (b) vá **hai lần** → code nhân đôi. Cả hai chỉ lộ ra khi người dùng đóng cửa sổ `.exe` và nhận `Tcl_AsyncDelete`, tức sau khi đã phát hành.
