@@ -208,6 +208,14 @@ def _ports_covered_for_shadow(service: ResolvedService, ports) -> bool:
     """CHI dung cho kiem tra shadowing - tuong tu _side_all_for_shadow nhung cho phia
     service/port: co kiem tra service.is_any (rule dung service=any) ma _ports_covered()/
     ResolvedService.covers() dung chung KHONG kiem tra."""
+    # B3 (10/2026): service KHONG do duoc -> coi nhu CO THE cover, y het cach ham
+    # nay doi xu voi is_any. Ly do giong nhau: muc dich cua ham la KHONG BO SOT rui
+    # ro bi che khuat / bi deny chan truoc. Mot rule deny dung service group khong
+    # doc duoc (vd group nam o vsys khac) truoc day ra 0 port -> bi coi la "khong
+    # cover port nao" -> tool im lang, admin tao rule moi duoi mot deny ma khong he
+    # duoc canh bao.
+    if getattr(service, 'unresolved', None):
+        return True
     if service.is_any:
         return True
     return _ports_covered(service, ports)
@@ -1318,10 +1326,17 @@ def _scan_all_tiers(rule_infos: List[RuleInfo], src_ranges, dst_ranges, ports,
                 # bat hon. Theo LUAT DA CHOT II.2.2, rule service=any KHONG BAO GIO
                 # duoc lam ket qua -> de dong di tiep xuong cac tier duoi y nhu rule
                 # do khong ton tai (viec bao cao do _find_broad_service_rule lo).
-                if not ri.service.is_any:
+                if ri.service.is_any:
+                    pass        # xu ly o nhanh _find_broad_service_rule (S3)
+                elif ri.service.unresolved:
+                    # B3: khong do duoc service thi KHONG the ket luan "chi thieu
+                    # port" -> khong duoc khuyen "+ ADD PORT". De dong di tiep xuong
+                    # cac tier duoi; ly do duoc bao cao qua _tag_untrusted_scope.
+                    pass
+                else:
                     top1_1_match = ri
-                skip_lower_tiers = True
-                continue
+                    skip_lower_tiers = True
+                    continue
 
         # ---- Tinh CHUNG 1 lan duy nhat cho rule nay: truoc day 3 noi khac nhau
         # (vong lap TOP2, vong lap TOP3, va _find_nearest_candidate_rule) deu tu
@@ -1585,6 +1600,12 @@ def _tag_untrusted_scope(res: RowResult, rule_infos: List[RuleInfo]) -> RowResul
         if names:
             parts.append(f"{side_name} cua rule con {len(names)} object KHONG resolve duoc "
                          f"ra IP: {', '.join(names)}")
+    # B3 (10/2026): bao cao ca phia SERVICE - khong do duoc port thi khong the ket
+    # luan "thieu port", va cung khong the ket luan pham vi port cua rule.
+    svc_names = sorted(getattr(ri.service, 'unresolved', None) or [])
+    if svc_names:
+        parts.append(f"Service cua rule con {len(svc_names)} object KHONG resolve duoc "
+                     f"ra port: {', '.join(svc_names)}")
     if parts:
         res.untrusted_scope = True
         res.untrusted_scope_detail = (

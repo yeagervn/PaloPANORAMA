@@ -57,6 +57,9 @@ REQUEST_ROWS = [
     # B1: nguon tu internet, rule doi zone trust -> phai chan duoc
     ("203.0.113.77", "192.168.50.91", "443",
      "B1 - nguon internet: default route cho ra untrust, rule doi trust -> PHAI chan"),
+    # B3: rule deny chan cap nay co service la group KHONG resolve duoc
+    ("10.10.88.11", "192.168.88.21", "9443",
+     "B3 - deny co service khong resolve duoc: PHAI van canh bao bi chan truoc"),
 ]
 
 # LUU Y: o "Danh sach IP can tim" chi nhan IP/range - KHONG co dong ghi chu,

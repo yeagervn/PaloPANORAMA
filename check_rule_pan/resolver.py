@@ -337,6 +337,16 @@ class ResolvedService:
     is_any: bool = False
     is_appdefault_portless: bool = False
     member_details: List[Tuple[Optional[str], str]] = field(default_factory=list)
+    # B3 (10/2026) - lo hong cung ho voi S1 nhung o phia SERVICE. Truoc day
+    # ResolvedService KHONG co field nay, va 3 duong tra ve 0 PORT ma khong danh
+    # dau gi: service/group khong tim thay, circular reference, va service object
+    # khong co dai port doc duoc. Lech CA HAI huong:
+    #   - an toan nhung sai: rule bi coi la IT PORT hon -> khuyen "+ ADD PORT" cho
+    #     port ma rule DA cho phep (admin them port object trung lap)
+    #   - NGUY HIEM: _ports_covered_for_shadow() coi 0 port la "khong cover" ->
+    #     BO SOT canh bao "co deny chan truoc" khi rule deny dung service group
+    #     khong doc duoc
+    unresolved: Set[str] = field(default_factory=set)
 
     def covers(self, proto: str, port: int) -> bool:
         if self.is_appdefault_portless:
@@ -386,7 +396,9 @@ class ServiceResolver:
             return self._cache[name]
         if name in visiting:
             self.log(f"CANH BAO: circular reference service tai '{name}'")
-            return ResolvedService()
+            r = ResolvedService()
+            r.unresolved.add(name)       # B3: khong duoc im lang 0 port
+            return r
 
         r = ResolvedService()
         obj = self.service_objects.get(name)
@@ -399,6 +411,12 @@ class ServiceResolver:
                     else:
                         r.ranges.append((proto, a, b))
                 r.member_details.append((name, f"{proto or '?'}/{obj.port_raw}"))
+            else:
+                # B3: co object nhung KHONG doc duoc dai port nao (vd protocol la
+                # dang tool chua hieu). 0 port im lang chinh la cai gay ra ca 2
+                # huong sai - phai danh dau.
+                r.unresolved.add(name)
+                self.log(f"CANH BAO: service '{name}' khong doc duoc dai port nao")
             self._cache[name] = r
             return r
 
@@ -410,6 +428,7 @@ class ServiceResolver:
                 r.ranges += sub.ranges
                 r.is_any = r.is_any or sub.is_any
                 r.member_details += sub.member_details
+                r.unresolved |= sub.unresolved      # B3: lan truyen len tren
             self._cache[name] = r
             return r
 
@@ -425,6 +444,7 @@ class ServiceResolver:
             return r
 
         self.log(f"CANH BAO: khong tim thay Service/Group '{name}'")
+        r.unresolved.add(name)           # B3: khong duoc im lang 0 port
         self._cache[name] = r
         return r
 
@@ -443,5 +463,14 @@ class ServiceResolver:
             r.exact_ports |= sub.exact_ports
             r.ranges += sub.ranges
             r.is_any = r.is_any or sub.is_any
+            sub = self.resolve_name(nm)
+            r.exact_ports |= sub.exact_ports
+            r.ranges += sub.ranges
+            r.is_any = r.is_any or sub.is_any
             r.member_details += sub.member_details
+            # B3 (10/2026): PHAI mang theo unresolved len tren. Thieu dong nay thi
+            # resolve_name() co danh dau cung vo nghia - chinh build_rule_infos() di
+            # qua ham NAY de dung ri.service, nen co nay se bi mat sach. (Da bi dung
+            # 1 lan: va resolve_name xong ma 2 ca test van do.)
+            r.unresolved |= sub.unresolved
         return r

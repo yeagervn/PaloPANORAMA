@@ -86,10 +86,15 @@ def tab_check_rule(host, key):
           list_devicegroups(root_el) == ["DG-ALL", "DG-DC", "DG-HN"])
 
     cfg = load_pan_config_from_xml_string(xml, DG, SERIAL)
+    # Assert nay truoc day viet qua sat chu (`[:2] == [...]`) nen chi can them 1
+    # rule o Shared-PRE la vo, du thu tu lap rap khong he sai. Nay khang dinh
+    # CHUOI vi_tri PHAN BIET - dung y dinh that cua 0.3, va CHAT HON (kiem ca 8
+    # buoc, khong chi 2 dau + 1 cuoi).
+    _thu_tu = list(dict.fromkeys(r.vi_tri for r in cfg["rules"]))
     check("0.3 - lap rap rulebase theo thu tu PAN-OS danh gia",
-          [r.vi_tri for r in cfg["rules"]][:2] == ["Shared-PRE", "DG-ALL-PRE"]
-          and [r.vi_tri for r in cfg["rules"]][-1] == "Shared-POST",
-          " -> ".join(dict.fromkeys(r.vi_tri for r in cfg["rules"])))
+          _thu_tu == ["Shared-PRE", "DG-ALL-PRE", "DG-DC-PRE", "DG-HN-PRE",
+                      "DG-HN-POST", "DG-DC-POST", "DG-ALL-POST", "Shared-POST"],
+          " -> ".join(_thu_tu))
     check("0.3 - POST-rulebase NGUOC chieu PRE",
           [r.dg for r in cfg["rules"] if r.rulebase == "post" and r.dg != "shared"]
           == ["DG-HN", "DG-DC", "DG-ALL"])
@@ -230,6 +235,18 @@ def tab_check_rule(host, key):
           len(cfg.get('static_routes') or []) == 2,
           f"{len(cfg.get('static_routes') or [])} route")
 
+    # --- B3 (10/2026): service cua rule deny KHONG resolve duoc ---
+    # Dong 18: rule deny S00B-DENY-SVC-THIEU chan dung cap nay, nhung service cua no
+    # tro tói mot service KHONG TON TAI -> resolve ra 0 PORT. Truoc ban va,
+    # _ports_covered_for_shadow() coi 0 port la "khong cover port nao" nen tool IM
+    # LANG - huong sai NGUY HIEM (admin tao rule moi duoi mot deny ma khong he biet).
+    _rb3, _ab3 = row_of(17)
+    check("Dong 18: B3 - deny co service khong resolve duoc VAN duoc canh bao",
+          _rb3.blocking_deny_rule == "S00B-DENY-SVC-THIEU",
+          f"deny={_rb3.blocking_deny_rule} tier={_rb3.tier}")
+    check("Dong 18: B3 - va vi deny do o Shared-PRE nen ket luan la KHONG THE cap phep",
+          _rb3.blocked_at_shared_pre, str(_rb3.blocking_deny_detail)[:70])
+
     check("Dong 13: dung CANDIDATE config (khong bao TAO MOI)",
           results[12].used_candidate_rule is not None, str(results[12].used_candidate_rule))
     check("Dong 15: token rac duoc bao cao, khong nuot im lang",
@@ -339,7 +356,7 @@ def tab_check_ip(host, key):
         root, DG, ips, 20, log_func=lambda m: None,
         progress_cb=lambda *a: None, cancel_event=_th.Event(), registered_ip_tags=tags)
     check("Pipeline tra cuu Security Rule (ca Shared lan chuoi DG, pre+post)",
-          len(rules) == 15 and len(match) > 0,
+          len(rules) == 16 and len(match) > 0,
           f"{len(rules)} rule, {len(match)} IP co ket qua")
     vt = {r.name: r.vi_tri for r in rules}
     check("0.3 - moi rule co nhan 'Vi tri Rule' dung cho",
@@ -394,7 +411,7 @@ def tab_check_audit(host, key):
     root = client.fetch_running_config()
     objs = parse_devicegroup_objects(root, DG)
     rules = assemble_security_rules(root, DG)
-    check("Doc rulebase cho audit (lap rap theo 0.3)", len(rules) == 15, f"{len(rules)} rule")
+    check("Doc rulebase cho audit (lap rap theo 0.3)", len(rules) == 16, f"{len(rules)} rule")
 
     gr = GroupResolver(objs["address_objects"], objs["address_groups"])
     sr = ServiceResolver(objs["service_objects"], objs["service_groups"])

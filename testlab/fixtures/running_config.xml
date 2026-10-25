@@ -18,6 +18,16 @@
     </service>
     <pre-rulebase><security><rules>
       <!-- Shared-PRE: rule deny tren cung cua TOAN BO Panorama -> test SHADOW -->
+      <!-- B3: rule DENY tro tói mot service KHONG TON TAI trong config (mo phong
+           service nam o DG khac / da bi xoa) -> resolve ra 0 PORT. Truoc ban va, 0
+           port im lang lam _ports_covered_for_shadow() coi la "khong cover port nao"
+           -> tool BO SOT canh bao "co deny chan truoc" (huong sai NGUY HIEM). -->
+      <entry name="S00B-DENY-SVC-THIEU">
+        <from><member>any</member></from><to><member>any</member></to>
+        <source><member>HOST-B3-SRC</member></source><destination><member>HOST-B3-DST</member></destination>
+        <service><member>SVC-KHONG-TON-TAI</member></service><application><member>any</member></application>
+        <action>deny</action>
+      </entry>
       <entry name="S00-BLOCK-BADNET">
         <from><member>any</member></from><to><member>any</member></to>
         <source><member>10.66.66.0/24</member></source><destination><member>any</member></destination>
@@ -130,6 +140,9 @@
           <!-- B1: nguon tu INTERNET - ngoai MOI subnet interface cua Template -->
           <entry name="HOST-INET"><ip-netmask>203.0.113.77/32</ip-netmask></entry>
           <entry name="HOST-B1-DST"><ip-netmask>192.168.50.91/32</ip-netmask></entry>
+          <!-- B3: cap dia chi rieng cho ca "service cua rule deny KHONG resolve duoc" -->
+          <entry name="HOST-B3-SRC"><ip-netmask>10.10.88.11/32</ip-netmask></entry>
+          <entry name="HOST-B3-DST"><ip-netmask>192.168.88.21/32</ip-netmask></entry>
           <entry name="FQDN-UPDATE"><fqdn>updates.example.com</fqdn></entry>
         </address>
         <address-group>
