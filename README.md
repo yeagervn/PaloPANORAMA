@@ -105,7 +105,7 @@ check_ip_pan/     tool #2 — core, pan_api, resolver_engine, matching_engine, e
 check_audit_pan/  tool #3 — core, pan_api, resolver, detectors, excel_io, gui
 tools/
   build_panorama_single.py   nén 3 package → nhúng vào file gộp (idempotent, có --check)
-tests/            291 test khi máy có Tk + Xvfb — unittest, không cần Panorama
+tests/            303 test khi máy có Tk + Xvfb — unittest, không cần Panorama
 testlab/          Panorama GIẢ LẬP + fixture + bộ nghiệm thu 68 ca
 PaloPANORAMA_single.py   bản gộp 1 file (SINH TỰ ĐỘNG — đừng sửa tay)
 PaloPANORAMA_single.md   TÀI LIỆU CHÍNH: PHẦN 0 (delta Panorama) + luật từng tool + nhật ký
@@ -119,12 +119,12 @@ require.md               spec gốc
 ```bash
 # 1. Unit + E2E GUI (không cần Panorama thật)
 # Con số phụ thuộc trình thông dịch — chỉ dòng cuối là nghiệm thu đầy đủ:
-python3.13 -m unittest discover -s tests -q             # 279 test, skipped=5 (3.13 KHÔNG có tkinter)
-python3.12 -m unittest discover -s tests -q             # 279 test, skipped=4 (có tkinter, thiếu $DISPLAY)
-xvfb-run -a python3.12 -m unittest discover -s tests -q # 291 test, 0 skip  ← dùng con số này
+python3.13 -m unittest discover -s tests -q             # 291 test, skipped=5 (3.13 KHÔNG có tkinter)
+python3.12 -m unittest discover -s tests -q             # 291 test, skipped=4 (có tkinter, thiếu $DISPLAY)
+xvfb-run -a python3.12 -m unittest discover -s tests -q # 303 test, 0 skip  ← dùng con số này
 
 # 2. Nghiệm thu toàn bộ tính năng trên Panorama giả lập
-python testlab/run_all_features.py --auto             # 80/80 PASS
+python testlab/run_all_features.py --auto             # 83/83 PASS
 ```
 
 | Tầng | Phủ gì | KHÔNG phủ gì |
