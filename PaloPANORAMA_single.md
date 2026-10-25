@@ -24,10 +24,10 @@
 | **Cập nhật lúc** | 2026-10-25 |
 | **Repo / branch** | `yeagervn/PaloPANORAMA` — branch **`main`** (bản này được lấy làm main) |
 | **Commit HEAD** | xem commit mới nhất trên nhánh làm việc (bản gộp định danh bằng SHA256 bên dưới) |
-| **Sản phẩm chính** | `PaloPANORAMA_single.py` (bản gộp 1 file, SHA256 `bfef091f007f50786e3b7d8226c34433c466b05d356b79479cec3febe170f435`, 253161 ký tự, nhúng 22 file py) |
+| **Sản phẩm chính** | `PaloPANORAMA_single.py` (bản gộp 1 file, SHA256 `4d0faff61bd981c17af8f90d46229110a61d4ee482a014dba3877acc980a5e88`, 258685 ký tự, nhúng 22 file py) |
 | **Sinh lại bản gộp** | `python tools/build_panorama_single.py` — kiểm tra lệch: `--check` (exit 1 nếu lệch), idempotent |
-| **Bộ test chung** | **Con số phụ thuộc trình thông dịch — phải ghi rõ cái nào:** `python3.13 -m unittest discover -s tests -q` (bản 3.13 trong container **không có tkinter**) → **231 test, OK (skipped=5)**; `python3.12 ...` (có tkinter, **không có `$DISPLAY`**) → **231 test, OK (skipped=4)**; `xvfb-run -a python3.12 -m unittest discover -s tests -q` → **243 test, OK, 0 skip** ← **đây mới là con số nghiệm thu đầy đủ** |
-| **Nghiệm thu trên Panorama giả lập** | `python testlab/run_all_features.py --auto` → **68/68 PASS** (xem PHẦN VI) |
+| **Bộ test chung** | **Con số phụ thuộc trình thông dịch — phải ghi rõ cái nào:** `python3.13 -m unittest discover -s tests -q` (bản 3.13 trong container **không có tkinter**) → **237 test, OK (skipped=5)**; `python3.12 ...` (có tkinter, **không có `$DISPLAY`**) → **237 test, OK (skipped=4)**; `xvfb-run -a python3.12 -m unittest discover -s tests -q` → **249 test, OK, 0 skip** ← **đây mới là con số nghiệm thu đầy đủ** |
+| **Nghiệm thu trên Panorama giả lập** | `python testlab/run_all_features.py --auto` → **76/76 PASS** (xem PHẦN VI) |
 | **3 package** | `check_rule_pan/`, `check_ip_pan/`, `check_audit_pan/` — độc lập 100% về code/namespace/output/log |
 
 `skipped=4` là **toàn bộ các test cần cửa sổ Tk thật** (`tests/test_gui_thread_safety.py::TestCloseWhileWorkerRunning`
@@ -48,6 +48,7 @@ standalone thì mất tới 16 test trên 3.13 vì module đổ ngay khi import.
 | Luật nghiệp vụ 3 tool — **giữ nguyên 100%** so với bản Firewall standalone | **Đã kiểm chứng** | 243 test (có Tk), trong đó port nguyên 9 bộ test nghiệp vụ của bản standalone + differential 1500 kịch bản ngẫu nhiên |
 | 8 điểm đặc thù Panorama 0.1 → 0.8 (chuỗi DG, thừa kế object, lắp ráp 6 bước, candidate, Live Match/Zone/hit-count cần `target`, xpath ghi theo DG) | **Đã kiểm chứng** | `tests/test_panorama_infra.py` (36 test) + **68/68** ca nghiệm thu lab |
 | Lớp gọi API thật (HTTPS, op-command, parse phản hồi, lệnh ghi candidate) | **Đã kiểm chứng trên Panorama GIẢ LẬP** | `testlab/run_all_features.py --auto` |
+| **UNUSED phải 0 hit trên MỌI firewall của Device Group** | **Đã kiểm chứng (giả lập)** | `tests/test_hitcount_multi_device.py` (6 ca) + **8 ca `testlab`**, trong đó 1 ca **tái hiện lại rủi ro cũ** (đọc 1 serial → vẫn kết luận UNUSED) để chứng minh lab phân biệt được 2 cách đọc; `hits_known=False` khi thiếu bằng chứng → không kết luận UNUSED |
 | Bản gộp 1 file | **Đã kiểm chứng** | build idempotent + SHA256 ở trên; giải nén zip nhúng, import lại 9 module logic từ bộ nhớ, xác nhận bản nhúng **không cũ hơn** source |
 | **Chính bộ sinh bản gộp** (`tools/build_panorama_single.py`) | **Đã kiểm chứng** | `tests/test_build_panorama_single.py` (7 ca): `_replace` báo lỗi khi mất mốc neo / bỏ qua khi đã vá, `done_if` nhiều mốc, build **idempotent** (chạy 2 lần ra byte y hệt), `on_close()` sinh ra gọi `shutdown()` cho **cả 3 tab**, sinh lại đúng từ dạng `on_close` cũ 2 tab, và **sống sót khi `main()` bị sửa tay** |
 | **GUI thật — lái hết luồng nghiệp vụ qua giao diện, CẢ 3 TAB** | **Đã kiểm chứng (headless)** | 3 file E2E lái thật giao diện trên **Panorama giả lập của testlab**: `tests/test_gui_e2e_check_rule.py` (Load Config → nhập tay → Check → chạy file mẫu → sinh đúng 1 `Result_*.xlsx` cạnh file input → đóng cửa sổ giữa chừng), `test_gui_e2e_check_ip.py` (Connect → chọn DG-HN → dán IP → Check/Export → Excel 2 sheet; ca để trống; ca Cancel), `test_gui_e2e_check_audit.py` (Connect → tick cả 3 detector → Check → Export; ca bỏ tick hết; ca D6 không bao giờ gọi commit) |
@@ -579,9 +580,25 @@ ràng, giữ nguyên nguyên tắc validate nghiêm ngặt của bản gốc ch�
 
 ## IV.7. Giới hạn đã biết (CHECK AUDIT, bản Panorama)
 
-1. UNUSED phụ thuộc `show rule-hit-count` **và bắt buộc có Target Firewall** — không có Target →
-   nhánh UNUSED tự tắt hoàn toàn (không phải "API không hỗ trợ" như bản gốc, mà là "chưa chọn
-   thiết bị để hỏi"); nhánh UNREACHABLE vẫn chạy.
+1. UNUSED phụ thuộc `show rule-hit-count` **và bắt buộc có ít nhất 1 firewall để hỏi** — không
+   xác định được firewall nào (Device Group không có thiết bị **và** chưa nhập Target) → nhánh
+   UNUSED tự tắt hoàn toàn (không phải "API không hỗ trợ" như bản gốc, mà là "chưa có thiết bị
+   để hỏi"); nhánh UNREACHABLE vẫn chạy.
+1b. **UNUSED chỉ được kết luận khi 0 hit trên MỌI firewall của Device Group** (sửa 2026-10-26a —
+   rủi ro cao nhất của cả suite). Hit-count là số liệu của **từng** firewall, nhưng 1 rule trong
+   DG được push xuống **mọi** firewall của DG đó: đọc 1 serial rồi kết luận UNUSED là đề xuất
+   **XOÁ một rule đang chạy trên firewall khác**. Phạm vi firewall =
+   `devicegroup_device_serials(config, DG)` ∪ Target Firewall. Firewall nào **không đọc được** số
+   liệu (lỗi API, hoặc trả về OK nhưng không có dòng nào cho rule đó) → `RuleHitStat.hits_known
+   = False` → **không kết luận UNUSED** ("không biết" KHÁC "bằng 0" — cùng nguyên tắc với
+   `_scope_trustworthy()` bên CHECK RULE). Mọi kết luận kèm `evidence_scope` nói rõ đã kiểm
+   những firewall nào. Chi phí: 4 lệnh phạm vi × N firewall, **tuyến tính theo số firewall**,
+   không nhân theo số rule.
+1c. **Hạn chế còn lại của 1b** (phải nói rõ): rule ở `Shared-PRE`/`Shared-POST` áp cho **mọi**
+   firewall Panorama quản lý, không chỉ các con trong DG đang chọn — nên với rule Shared, phạm vi
+   bằng chứng vẫn **hẹp hơn phạm vi thật**. Vì vậy tool không in một chữ "UNUSED" trần mà luôn
+   kèm câu "đã kiểm N firewall: ...". Muốn đủ tuyệt đối thì phải quét mọi firewall Panorama quản
+   lý (`<show><devices><all/>`) — **chưa làm**, vì chi phí tăng theo toàn bộ estate.
 2. Overly Permissive chỉ nhận diện literal `any` (giữ nguyên).
 3. Delete chỉ tác động Candidate Config **của Panorama**, không commit, không push — admin phải
    tự review + Commit + Commit-and-Push thủ công (mở rộng từ D6 gốc, xem 0.4).
@@ -802,6 +819,17 @@ hổng thật của sản phẩm** (hit-count bỏ sót phạm vi Shared) — kh
 ---
 
 # PHẦN XIV — NHẬT KÝ THAY ĐỔI GẦN NHẤT
+
+- **[2026-10-26a] RỦI RO CAO NHẤT CỦA CẢ SUITE: hit-count đọc từ MỘT serial nhưng rule được push cho CẢ DEVICE GROUP → Import có thể XOÁ rule đang chạy trên firewall khác** (`check_audit_pan/core.py`, `check_audit_pan/pan_api.py`, `check_audit_pan/detectors.py`, `check_audit_pan/gui.py`, `tests/test_hitcount_multi_device.py` mới, `tests/test_verify_batch.py`, `testlab/mock_panorama_api.py`, `testlab/fixtures/running_config.xml`, `testlab/run_all_features.py`):
+  - **Lỗi — đường duy nhất trong cả suite có thể phá production.** Hit-count là số liệu của **từng** firewall, nhưng 1 rule trong Device Group được Panorama push xuống **mọi** firewall của DG đó. Tool chỉ đọc hit-count của đúng 1 serial (ô "Target Firewall") rồi kết luận UNUSED. Kịch bản thật: rule `R-SHARED-SQL` ở `DG-ALL-PRE` push cho 3 firewall; admin nhập Target = serial HN; HN không dùng rule đó → `hit_count=0`, tuổi 400 ngày → **UNUSED** → vào file Import → Import **DELETE** rule khỏi candidate-config của DG → commit xong là **2 firewall kia mất rule đang chạy**. Đã tái hiện 100% bằng script: `hit_count` đọc từ HN = `None`, detector kết luận `UNUSED`.
+  - **Điều đáng nói: bài này đã được giải rất kỹ ở tool Check Point** (8 root cause của false-zero, phân biệt `hits_known` ≠ `hits==0`, guard re-verify, backup bắt buộc) — **bản Palo chưa thừa hưởng gì cả**. Entry này mang nguyên tắc đó sang.
+  - **Đã sửa thế nào.** `RuleHitStat` thêm `devices_seen` / `devices_missing` + property `hits_known` và `evidence_scope`. `PanApiClient.fetch_rule_hit_count_multi(serials)` đọc **từng** firewall rồi **gộp**: `hit_count` = **tổng** (hit > 0 ở **bất kỳ** firewall nào là rule còn sống), `last_hit` = **mới nhất**, `rule_creation` = **sớm nhất**; firewall nào lỗi API **hoặc** trả về OK mà không có dòng nào cho rule đó đều vào `devices_missing`. `detectors._find_unused_rules()` **bỏ qua** rule có `hits_known=False` — "không biết" KHÁC "bằng 0", đúng nguyên tắc đã áp cho `_scope_trustworthy()` bên CHECK RULE. GUI: `_hitcount_serials()` lấy phạm vi = **mọi firewall của DG** ∪ Target, log rõ đã kiểm những con nào và bao nhiêu rule thiếu bằng chứng; `_delete_worker` xác minh lại bằng **đúng phạm vi đó** (nếu không thì bước xác minh lại "xác nhận" bằng số liệu hẹp hơn chính cái đã dùng để kết luận — vô nghĩa). Chi phí: 4 lệnh × N firewall, **tuyến tính theo số firewall**, không nhân theo số rule.
+  - **3 cách `hit_count=0` mà KHÔNG có nghĩa là rule chết (ghi lại để không ai "tối ưu" bỏ đi).** `clear rule hit-count` sau khi debug; member **passive** của cặp HA không xử lý traffic nên hit gần 0; rule bị rename/tạo lại thì counter về 0. Cái thứ nhất và thứ ba còn phụ thuộc phiên bản PAN-OS — **chưa xác nhận trên thiết bị thật**, xem mục CHƯA làm.
+  - **2 lỗi tao tự gây ra, test cũ bắt được (ghi lại để không tái phạm).** (1) Lần đầu tao `from check_rule_pan.core import devicegroup_devices` trong `check_audit_pan/gui.py` — **vi phạm luật 3 package độc lập 100%**; `tests/test_panorama_infra.py::test_3_package_khong_import_lan_nhau` đỏ ngay. Đã viết hàm riêng `devicegroup_device_serials()` trong `check_audit_pan/pan_api.py`, và nó phải **ưu tiên tuyệt đối nhánh ngoài `<readonly>`** (bẫy đã ghi ở PHẦN 0 mục 6: bản readonly thường chỉ có `<parent-dg>`, **không có `<devices>`** → lấy nhầm là trả rỗng → rơi lại đúng cái lỗi đang sửa). (2) `_delete_worker` đổi sang `fetch_rule_hit_count_multi` làm patch cũ của `tests/test_verify_batch.py::test_11` không còn trúng → bộ lọc hit-count ở bước xác minh **âm thầm mất tác dụng** và test "xanh giả" (`ok_disable` 1 → 2). Đã đổi patch target sang hàm mới, **giữ nguyên toàn bộ assert**.
+  - **Mở rộng `testlab/` — và nó TÁI HIỆN được rủi ro cũ.** `mock._hit_stat()` nay nhận `target` và có marker thứ hai `-NOHIT1`: 0 hit **chỉ trên firewall đầu tiên**, các con khác đang dùng. Thêm rule `H04-DUNG-O-FW2-NOHIT1` vào `DG-HN-PRE` (DG-HN có **2** firewall). 8 ca mới, trong đó 1 ca **cố ý khẳng định cách cũ VẪN kết luận UNUSED** (`đọc 1 serial → UNUSED`) — nhờ vậy lab chứng minh được nó **phân biệt** 2 cách đọc, chứ không chỉ "xanh vì code mới". Các ca còn lại: đọc cả DG → `hit gộp = 507`, không còn UNUSED; `evidence_scope` ghi đủ 2 serial; firewall thứ 2 không phản hồi → `hits_known=False` + không kết luận UNUSED. Rule trong fixture 13 → **14**, cập nhật đúng 2 chỗ assert đếm rule.
+  - **Cố tình KHÔNG đổi.** Không đổi chốt D6 (không bao giờ `commit`), không đổi 3 detector, không đổi format 15 cột, không đổi luật nghiệp vụ nào của 3 tool, không đổi nhánh `<shared>` best-effort. `fetch_rule_hit_count()` (1 serial) **vẫn còn** và vẫn được dùng ở các chỗ chỉ cần số liệu 1 thiết bị — chỉ nơi **kết luận UNUSED** mới bắt buộc dùng bản `_multi`.
+  - **Bằng chứng đo thật.** `python3.13` → **237 test, OK (skipped=5)**; `python3.12` → **237 test, OK (skipped=4)**; `xvfb-run -a python3.12` → **249 test, OK, 0 skip**; `testlab --auto` → **76/76 PASS**; `--check` → exit **0**; SHA256 `4d0faff61bd981c17af8f90d46229110a61d4ee482a014dba3877acc980a5e88`, 258685 ký tự. **Kiểm chứng ngược:** vô hiệu cổng `hits_known` trong `_find_unused_rules` → 1 ca unit đỏ + lab ca "thiếu bằng chứng" đỏ (**75/76**); hoàn nguyên → **76/76**.
+  - **CHƯA làm / hạn chế còn lại.** (1) Rule ở **Shared-PRE/Shared-POST** áp cho **mọi** firewall Panorama quản lý, không chỉ các con trong DG đang chọn → với rule Shared, phạm vi bằng chứng **vẫn hẹp hơn phạm vi thật**. Tool nói rõ bằng `evidence_scope` nhưng **chưa** quét toàn bộ estate (`<show><devices><all/>`) vì chi phí tăng theo cả hệ. (2) **Chưa xác nhận trên Panorama/PAN-OS thật**: counter có reset theo reboot/dataplane restart hay không là **phụ thuộc phiên bản** — tài liệu này cố ý **không** khẳng định, cần 1 lần kiểm trên thiết bị. (3) Chưa đọc `last-reset` / `rule-modification-timestamp` để phát hiện "counter vừa bị clear" như tool Check Point đang làm — đó là bước tiếp theo đúng hướng. (4) Cặp **HA**: tool không biết con nào active/passive; nếu DG chứa cả 2 member thì con passive luôn ~0 hit, và vì luật mới là "0 hit trên MỌI con" nên **hướng sai là an toàn** (ít UNUSED hơn), nhưng chưa nhận diện HA tường minh. (5) Bốn hạn chế lớn không đổi: chưa nhìn bố cục GUI trên Windows thật, **chưa chạy với Panorama THẬT**, schema `<shared>` của `rule-hit-count` chưa xác nhận, rule cục bộ trên firewall chưa có ô nạp.
 
 - **[2026-10-25c] Tài liệu: số test không ghi rõ trình thông dịch → người đọc có thể tưởng "ít test hơn" trong khi thực tế là "có test không bao giờ chạy"; đồng bộ 3 phát hiện của repo standalone sang đây** (`PaloPANORAMA_single.md`, `README.md` — **không đụng code**):
   - **Vấn đề.** Mục TÌNH TRẠNG và `README.md` ghi `231 test (skipped=4)` mà không nói chạy bằng trình thông dịch nào. Đo lại cả 3 cách: `python3.13` (bản trong container **không có tkinter**) → `231, skipped=**5**`; `python3.12` (có tkinter, thiếu `$DISPLAY`) → `231, skipped=**4**`; `xvfb-run -a python3.12` → `243, **0 skip**`. Con số cũ trong `README.md` (`224`/`236`) còn là của **trước** entry 2026-10-25b nên đã lạc hậu hẳn.

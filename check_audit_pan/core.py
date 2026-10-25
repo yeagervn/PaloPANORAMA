@@ -169,6 +169,45 @@ class RuleHitStat:
     hit_count: Optional[int]
     last_hit_timestamp: Optional[object]            # datetime | None
     rule_creation_timestamp: Optional[object]       # datetime | None
+    # P1 (10/2026) - RUI RO CAO NHAT CUA CA SUITE da sua o day.
+    # Hit-count tren Panorama la so lieu CUA TUNG FIREWALL, nhung 1 rule trong
+    # Device Group duoc push xuong MOI firewall cua DG do. Truoc ban va, tool chi
+    # doc hit-count cua DUNG 1 serial (o "Target Firewall") roi ket luan UNUSED ->
+    # Import se DELETE rule khoi candidate cua DG -> commit xong la cac firewall
+    # KHAC trong cung DG mat rule dang chay.
+    # 2 field duoi day ghi lai PHAM VI BANG CHUNG: da doc duoc hit-count tu nhung
+    # firewall nao (devices_seen) va firewall nao KHONG doc duoc (devices_missing).
+    devices_seen: tuple = ()
+    devices_missing: tuple = ()
+
+    @property
+    def hits_known(self) -> bool:
+        """Bang chung hit-count co DAY DU khong.
+
+        False khi co firewall trong pham vi query ma khong doc duoc so lieu (loi
+        API, hoac tra ve OK nhung khong co dong nao cho rule nay - vd rule chua
+        duoc push tói no). Luc do "khong biet" KHAC "bang 0", va TUYET DOI khong
+        duoc ket luan UNUSED - dung phan biet da ap cho _scope_trustworthy() ben
+        CHECK RULE.
+
+        Ca 2 field rong = ban dung tay/1 firewall (moi test cu, ban standalone) ->
+        coi nhu DA BIET, giu nguyen hanh vi cu."""
+        return not self.devices_missing
+
+    @property
+    def evidence_scope(self) -> str:
+        """Mot cau noi ro da kiem nhung firewall nao - de ghi vao Finding/log, vi
+        'UNUSED' ma khong noi pham vi la ket luan khong the kiem chung lai."""
+        if not self.devices_seen and not self.devices_missing:
+            return ""
+        parts = []
+        if self.devices_seen:
+            parts.append(f"da doc hit-count tu {len(self.devices_seen)} firewall: "
+                         f"{', '.join(self.devices_seen)}")
+        if self.devices_missing:
+            parts.append(f"KHONG doc duoc tu {len(self.devices_missing)} firewall: "
+                         f"{', '.join(self.devices_missing)}")
+        return " | ".join(parts)
 
     @property
     def last_hit_date(self) -> Optional[str]:

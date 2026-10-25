@@ -282,7 +282,7 @@ def tab_check_ip(host, key):
         root, DG, ips, 20, log_func=lambda m: None,
         progress_cb=lambda *a: None, cancel_event=_th.Event(), registered_ip_tags=tags)
     check("Pipeline tra cuu Security Rule (ca Shared lan chuoi DG, pre+post)",
-          len(rules) == 13 and len(match) > 0,
+          len(rules) == 14 and len(match) > 0,
           f"{len(rules)} rule, {len(match)} IP co ket qua")
     vt = {r.name: r.vi_tri for r in rules}
     check("0.3 - moi rule co nhan 'Vi tri Rule' dung cho",
@@ -337,10 +337,74 @@ def tab_check_audit(host, key):
     root = client.fetch_running_config()
     objs = parse_devicegroup_objects(root, DG)
     rules = assemble_security_rules(root, DG)
-    check("Doc rulebase cho audit (lap rap theo 0.3)", len(rules) == 13, f"{len(rules)} rule")
+    check("Doc rulebase cho audit (lap rap theo 0.3)", len(rules) == 14, f"{len(rules)} rule")
 
     gr = GroupResolver(objs["address_objects"], objs["address_groups"])
     sr = ServiceResolver(objs["service_objects"], objs["service_groups"])
+    import logging as _lg
+    # --- P1 (10/2026): UNUSED phai 0 hit tren MOI firewall cua Device Group ---
+    # So sanh TRUC TIEP 2 cach doc tren cung 1 rule (H04-DUNG-O-FW2-NOHIT1):
+    #   - doc rieng serial 001122334455 -> 0 hit -> ket luan UNUSED (CACH CU, NGUY HIEM)
+    #   - doc ca 2 firewall cua DG-HN    -> co hit -> KHONG phai UNUSED (CACH DUNG)
+    # Rule nay nam o DG-HN-PRE va DG-HN co 2 firewall, nen "UNUSED" theo cach cu
+    # dong nghia voi de xuat XOA mot rule dang chay tren firewall thu 2.
+    import datetime as _dt
+    from check_audit_pan.detectors import _find_unused_rules as _unused
+    from check_audit_pan.pan_api import (fetch_rule_hit_count_multi,
+                                          devicegroup_device_serials)
+
+    _serials = devicegroup_device_serials(root, DG)
+    check("P1 - liet ke dung cac firewall cua Device Group (khong lay nham ban readonly)",
+          len(_serials) == 2 and SERIAL in _serials,
+          f"{DG} -> {_serials}")
+
+    _rule_h04 = [r for r in rules if r.name == "H04-DUNG-O-FW2-NOHIT1"]
+    check("P1 - fixture co rule dung o firewall thu 2", len(_rule_h04) == 1,
+          str([r.name for r in rules if "H04" in r.name]))
+
+    _now = _dt.datetime.now()
+    # (a) CACH CU: chi doc 1 serial
+    _hits_one = fetch_rule_hit_count(host, key, SERIAL, log_func=lambda m: None)
+    _unused_one = _unused(_rule_h04, _hits_one, _now)
+    check("P1 - TAI HIEN rui ro: doc 1 serial thi rule nay bi ket luan UNUSED",
+          bool(_unused_one),
+          f"hit tren {SERIAL} = {(_hits_one.get(('H04-DUNG-O-FW2-NOHIT1','DG-HN-PRE')) or object()).__dict__.get('hit_count', '?') if _hits_one.get(('H04-DUNG-O-FW2-NOHIT1','DG-HN-PRE')) else 'khong co'}")
+
+    # (b) CACH DUNG: doc ca Device Group
+    _hits_all = fetch_rule_hit_count_multi(host, key, _serials, log_func=lambda m: None)
+    _st = _hits_all.get(("H04-DUNG-O-FW2-NOHIT1", "DG-HN-PRE"))
+    check("P1 - doc ca DG thi thay rule DANG DUOC DUNG (hit > 0)",
+          _st is not None and (_st.hit_count or 0) > 0,
+          f"hit gop = {_st and _st.hit_count}")
+    check("P1 - va KHONG con bi ket luan UNUSED (khong de xuat xoa rule dang chay)",
+          _unused(_rule_h04, _hits_all, _now) == {}, "")
+    check("P1 - bang chung ghi ro da kiem nhung firewall nao",
+          _st is not None and set(_st.devices_seen) == set(_serials)
+          and _st.hits_known and _st.evidence_scope,
+          str(_st and _st.evidence_scope))
+
+    # (c) THIEU bang chung: 1 firewall khong doc duoc -> "khong biet" KHAC "bang 0"
+    _cli_p1 = PanApiClient(host, key, verify_ssl=False)
+    _orig_p1 = _cli_p1._request
+    def _reject_fw2(params, *a, **k):
+        if params.get("target") == "009988776655":
+            raise RuntimeError("mo phong: firewall thu 2 khong phan hoi")
+        return _orig_p1(params, *a, **k)
+    _cli_p1._request = _reject_fw2
+    _lg.getLogger("CheckAudit").setLevel(_lg.CRITICAL)
+    try:
+        _hits_part = _cli_p1.fetch_rule_hit_count_multi(_serials, log_func=lambda m: None)
+    finally:
+        _lg.getLogger("CheckAudit").setLevel(_lg.WARNING)
+    _rule_dead = [r for r in rules if r.name == "H90-SHADOWED-NOHIT"]
+    _st_part = _hits_part.get(("H90-SHADOWED-NOHIT", "DG-HN-POST"))
+    check("P1 - firewall khong doc duoc -> hits_known=False (khong biet KHAC bang 0)",
+          _st_part is not None and not _st_part.hits_known
+          and "009988776655" in _st_part.devices_missing,
+          str(_st_part and _st_part.evidence_scope))
+    check("P1 - thieu bang chung thi KHONG ket luan UNUSED du phan doc duoc la 0 hit",
+          _unused(_rule_dead, _hits_part, _now) == {}, "")
+
     hits_notarget = fetch_rule_hit_count(host, key, "", log_func=lambda m: None)
     check("0.7 - THIEU Target: hit-count tra {} (nhanh UNUSED tu tat)",
           hits_notarget == {}, str(hits_notarget))
@@ -365,7 +429,6 @@ def tab_check_audit(host, key):
         return _orig_req(params, *a, **k)
     _cli._request = _reject_shared
     _warn = []
-    import logging as _lg
     _lg.getLogger("CheckAudit").setLevel(_lg.CRITICAL)  # canh bao nay la CO CHU DICH
     try:
         _degraded = _cli.fetch_rule_hit_count(SERIAL, log_func=_warn.append)

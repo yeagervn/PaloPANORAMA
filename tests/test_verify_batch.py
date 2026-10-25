@@ -380,7 +380,11 @@ class TestVerifyBatch(TestCase):
         client.set_rule_states(fresh_shared_pre, fresh_shared_post, fresh_dg_pre, fresh_dg_post)
         client.set_hit(hit_dict)
         # Patch the two fetch functions to use our fake client
-        with patch('check_audit_pan.gui.fetch_rule_hit_count', side_effect=lambda mgmt_ip, api_key, target_serial, verify_ssl=False, log_func=None: client.fetch_rule_hit_count(target_serial, log_func=log_func) if target_serial else {}):
+        # P1 (10/2026): _delete_worker nay goi fetch_rule_hit_count_multi (doc
+        # hit-count tren MOI firewall cua Device Group, khong chi Target). Patch
+        # phai doi theo, neu khong thi bo loc hit-count o buoc xac minh am tham
+        # mat tac dung va test se "xanh gia". GIU NGUYEN toan bo assert ben duoi.
+        with patch('check_audit_pan.gui.fetch_rule_hit_count_multi', side_effect=lambda mgmt_ip, api_key, serials, verify_ssl=False, log_func=None: client.fetch_rule_hit_count((list(serials) or [""])[0], log_func=log_func) if serials else {}):
             with patch('check_audit_pan.gui.fetch_current_rule_states', side_effect=lambda mgmt_ip, api_key, verify_ssl=False, log_func=None: client.fetch_current_rule_states(log_func=log_func)):
                 with patch('check_audit_pan.gui.delete_rule_candidate', side_effect=lambda mgmt_ip, api_key, dg, rb, name, verify_ssl=False: True) as mock_del:
                     with patch('check_audit_pan.gui.disable_rule_candidate', side_effect=lambda mgmt_ip, api_key, dg, rb, name, verify_ssl=False: True) as mock_dis:

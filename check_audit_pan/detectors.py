@@ -278,6 +278,15 @@ def _find_unused_rules(rules: List[RuleSnapshot], hit_stats: Dict[Tuple[str, str
             if stat is None:
                 continue
 
+        # P1 (10/2026) - CONG CHAN QUAN TRONG NHAT CUA TAB NAY.
+        # "Khong biet" KHAC "bang 0". Neu co firewall trong pham vi query ma khong
+        # doc duoc hit-count cho rule nay (loi API, hoac tra ve OK nhung khong co
+        # dong nao cho rule do) thi bang chung KHONG day du -> khong duoc ket luan
+        # UNUSED, vi UNUSED la cai dua rule vao file Import va Import se DELETE no
+        # khoi candidate-config cua ca Device Group.
+        if not getattr(stat, 'hits_known', True):
+            continue
+
         no_hit_days: Optional[int]
         if stat.hit_count and stat.hit_count > 0 and stat.last_hit_timestamp:
             no_hit_days = (now - stat.last_hit_timestamp).days

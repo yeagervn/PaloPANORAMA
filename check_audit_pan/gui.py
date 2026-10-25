@@ -29,7 +29,8 @@ from .core import (
 from .pan_api import (
     PanApiClient, get_devicegroup_list, parse_devicegroup_objects,
     assemble_security_rules, delete_rule_candidate, disable_rule_candidate,
-    fetch_rule_hit_count, fetch_current_rule_states,
+    fetch_rule_hit_count, fetch_rule_hit_count_multi, fetch_current_rule_states,
+    devicegroup_device_serials,
 )
 from .resolver import GroupResolver, ServiceResolver
 from .detectors import (
@@ -341,6 +342,32 @@ class App(ttk.Frame):
                                self._verify_ssl, unused_threshold),
                          daemon=True).start()
 
+    def _hitcount_serials(self, dg_name, target_serial):
+        """P1 (10/2026): PHAM VI firewall phai doc hit-count = MOI firewall cua
+        Device Group dang chon, HOP voi Target Firewall neu co.
+
+        Vi sao khong chi dung Target: hit-count la so lieu cua tung firewall, nhung
+        1 rule trong DG duoc push xuong MOI firewall cua DG. Doc 1 con roi ket luan
+        UNUSED = de xuat XOA rule co the dang chay tren cac con khac.
+
+        HAN CHE PHAI NOI RO: rule o Shared-PRE/Shared-POST ap cho MOI firewall
+        Panorama quan ly, khong chi cac con trong DG nay - nen voi rule Shared,
+        pham vi bang chung o day VAN con hep hon pham vi that. Vi vay ket luan
+        luon kem cau "da kiem N firewall: ..." (RuleHitStat.evidence_scope) thay vi
+        mot chu "UNUSED" tran.
+
+        Dung devicegroup_device_serials() CUA CHINH check_audit_pan (khong import
+        cheo tu check_rule_pan - 3 package doc lap 100%, co test khoa)."""
+        serials = []
+        try:
+            serials = list(devicegroup_device_serials(self.config_root, dg_name) or [])
+        except Exception as e:
+            self._log(f"CANH BAO: khong liet ke duoc firewall cua Device Group "
+                      f"{dg_name} ({e}) - se chi dua tren Target Firewall neu co.")
+        if target_serial and target_serial not in serials:
+            serials.append(target_serial)
+        return serials
+
     def _check_worker(self, dg_name, target_serial, types, mgmt_ip, api_key, verify_ssl,
                        unused_threshold_days=UNUSED_RULE_THRESHOLD_DAYS):
         try:
@@ -354,12 +381,27 @@ class App(ttk.Frame):
 
             hit_stats = {}
             if "shadow" in types:
-                if target_serial:
-                    self._log(f"Đọc Policy Optimizer (rule-hit-count) cho Target={target_serial}...")
-                    hit_stats = fetch_rule_hit_count(mgmt_ip, api_key, target_serial,
-                                                     verify_ssl=verify_ssl, log_func=self._log)
+                # P1 (10/2026): doc hit-count tren MOI firewall cua Device Group,
+                # khong chi rieng Target. Xem _hitcount_serials().
+                _serials = self._hitcount_serials(dg_name, target_serial)
+                if _serials:
+                    self._log(f"Đọc Policy Optimizer (rule-hit-count) trên "
+                              f"{len(_serials)} firewall của Device Group {dg_name}: "
+                              f"{', '.join(_serials)}")
+                    if len(_serials) == 1:
+                        self._log("LƯU Ý: chỉ có 1 firewall trong phạm vi → kết luận "
+                                  "UNUSED chỉ có giá trị cho đúng firewall đó.")
+                    hit_stats = fetch_rule_hit_count_multi(mgmt_ip, api_key, _serials,
+                                                           verify_ssl=verify_ssl,
+                                                           log_func=self._log)
+                    _thieu = sum(1 for st in hit_stats.values()
+                                 if not getattr(st, "hits_known", True))
                     self._log(f"Hit-count OK ({len(hit_stats)} rule có dữ liệu thống kê)"
                               if hit_stats else "Hit-count trả về rỗng → nhánh UNUSED sẽ bỏ qua")
+                    if _thieu:
+                        self._log(f"CANH BAO: {_thieu} rule THIẾU bằng chứng hit-count ở "
+                                  f"ít nhất 1 firewall → KHÔNG kết luận UNUSED cho các "
+                                  f"rule đó (không biết KHÁC bằng 0).")
                     # 0.6: kiem tra Template Zone neu co target (best-effort)
                     try:
                         from .pan_api import resolve_template_for_serial
@@ -369,7 +411,9 @@ class App(ttk.Frame):
                     except Exception:
                         pass
                 else:
-                    self._log("CANH BAO: chưa chọn Target Firewall (Serial) → nhánh UNUSED (Shadow) bị bỏ qua.")
+                    self._log("CANH BAO: không xác định được firewall nào (Device Group "
+                              "không có thiết bị và chưa nhập Target Firewall) → nhánh "
+                              "UNUSED (Shadow) bị bỏ qua.")
                     self._log("CANH BAO: chưa chọn Target Firewall (Serial) → so sánh Zone trong 5-điều-kiện-superset sẽ fallback 'luôn coi tương thích' (0.6), có thể báo shadow sai ở trường hợp Zone khác nhau (IV.2.3/IV.7.5).")
 
             findings: List[Finding] = []
@@ -692,7 +736,11 @@ class App(ttk.Frame):
         if target_serial:
             try:
                 self._log(f"Xác minh batch: đọc lại hit-count cho Target={target_serial}...")
-                fresh_hit_stats = fetch_rule_hit_count(mgmt_ip, api_key, target_serial, verify_ssl=verify_ssl, log_func=self._log)
+                # P1: xac minh lai PHAI dung dung pham vi nhu luc Check, neu khong
+                # thi buoc xac minh se "xac nhan" bang so lieu hep hon chinh cai
+                # da dung de ket luan - vo nghia.
+                _ser_v = self._hitcount_serials(getattr(self, '_dg_name', '') or '', target_serial)
+                fresh_hit_stats = fetch_rule_hit_count_multi(mgmt_ip, api_key, _ser_v, verify_ssl=verify_ssl, log_func=self._log)
                 self._log(f"  -> fresh_hit_stats: {len(fresh_hit_stats)} entry (khoá (name,vi_tri))")
             except Exception as e:
                 self._log(f"CANH BAO: fetch_rule_hit_count lỗi best-effort: {e} -> bỏ xác minh hit-count")

@@ -148,6 +148,17 @@
             <service><member>SVC-HTTPS</member></service><application><member>any</member></application>
             <action>allow</action>
           </entry>
+          <!-- P1 (10/2026): rule nay 0 hit tren firewall DAU TIEN (001122334455)
+                    nhung DANG DUOC DUNG tren 009988776655 - ca 2 deu thuoc DG-HN.
+                    Doc hit-count tu 1 serial roi ket luan UNUSED = de xuat XOA mot
+                    rule dang chay tren firewall khac. Marker '-NOHIT1' trong ten lam
+                    mock tra hit khac nhau theo target (xem mock._hit_stat). -->
+          <entry name="H04-DUNG-O-FW2-NOHIT1">
+            <from><member>trust</member></from><to><member>untrust</member></to>
+            <source><member>HOST-ONLY-HN</member></source><destination><member>HOST-DB-01</member></destination>
+            <service><member>SVC-ORACLE</member></service><application><member>any</member></application>
+            <action>allow</action>
+          </entry>
           <entry name="H03-ALLOW-BADNET-ANYWAY">
             <from><member>any</member></from><to><member>any</member></to>
             <source><member>HOST-BADNET-50</member></source><destination><member>HOST-DB-01</member></destination>

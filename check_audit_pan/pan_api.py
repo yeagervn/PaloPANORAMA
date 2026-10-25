@@ -168,6 +168,90 @@ class PanApiClient:
             )
         return True
 
+    def fetch_rule_hit_count_multi(self, serials, log_func=None):
+        """P1 (10/2026): doc hit-count tren **MOI firewall** duoc truyen vao roi GOP.
+
+        Vi sao bat buoc: hit-count la so lieu cua TUNG firewall, nhung 1 rule trong
+        Device Group duoc push xuong MOI firewall cua DG. Doc 1 serial roi ket luan
+        UNUSED = de xuat XOA mot rule co the dang chay tren cac firewall khac. Day la
+        duong duy nhat trong ca suite co the pha production.
+
+        Cach gop cho moi khoa (rule_name, vi_tri):
+          - hit_count                 = TONG hit cua cac firewall doc duoc (dung
+                                        >0 o BAT KY firewall nao la rule con song)
+          - last_hit_timestamp        = MOI NHAT trong cac firewall
+          - rule_creation_timestamp   = SOM NHAT (rule co the duoc push tai thoi
+                                        diem khac nhau)
+          - devices_seen / devices_missing: pham vi bang chung (xem
+            RuleHitStat.hits_known) - firewall nao loi API, HOAC tra ve OK nhung
+            khong co dong nao cho rule do, deu vao devices_missing.
+
+        Chi phi TUYEN TINH theo so firewall (4 lenh pham vi x N serial), khong nhan
+        theo so rule. Khong co serial nao -> tra {} va log canh bao (y nhu ban 1
+        serial khi thieu target).
+        """
+        log = log_func or (lambda msg: None)
+        serials = [x for x in dict.fromkeys(serials or []) if x]
+        if not serials:
+            log("CANH BAO: khong xac dinh duoc firewall nao de doc Rule Hit Count "
+                "(can Target Firewall hoac Device Group co thiet bi) - bo qua nhanh UNUSED.")
+            return {}
+
+        per_device = {}
+        failed = []
+        for ser in serials:
+            try:
+                per_device[ser] = self.fetch_rule_hit_count(ser, log_func=log_func)
+            except Exception as e:       # pragma: no cover - fetch da tu boc try
+                failed.append(ser)
+                log(f"CANH BAO: khong doc duoc hit-count tu firewall {ser} ({e}) - "
+                    f"cac rule lien quan se KHONG duoc ket luan UNUSED.")
+                continue
+            if not per_device[ser]:
+                # Tra ve rong = khong co bang chung tu con nay (fetch da log ly do)
+                failed.append(ser)
+
+        all_keys = set()
+        for d in per_device.values():
+            all_keys |= set(d.keys())
+
+        result = {}
+        for key in all_keys:
+            total = 0
+            any_count = False
+            last_ts = None
+            created_ts = None
+            seen, missing = [], []
+            for ser in serials:
+                st = per_device.get(ser, {}).get(key)
+                if st is None:
+                    missing.append(ser)
+                    continue
+                seen.append(ser)
+                if st.hit_count:
+                    total += st.hit_count
+                    any_count = True
+                if st.last_hit_timestamp is not None and \
+                        (last_ts is None or st.last_hit_timestamp > last_ts):
+                    last_ts = st.last_hit_timestamp
+                if st.rule_creation_timestamp is not None and \
+                        (created_ts is None or st.rule_creation_timestamp < created_ts):
+                    created_ts = st.rule_creation_timestamp
+            result[key] = RuleHitStat(
+                hit_count=(total if any_count else 0),
+                last_hit_timestamp=last_ts,
+                rule_creation_timestamp=created_ts,
+                devices_seen=tuple(seen),
+                devices_missing=tuple(missing),
+            )
+
+        n_khong_du = sum(1 for st in result.values() if not st.hits_known)
+        log(f"Rule Hit Count: da doc tren {len(serials)} firewall "
+            f"({', '.join(serials)}); {len(result)} rule co so lieu"
+            + (f"; {n_khong_du} rule THIEU bang chung (se KHONG ket luan UNUSED)"
+               if n_khong_du else ""))
+        return result
+
     def fetch_rule_hit_count(self, target_serial: str, log_func=None) -> Dict[Tuple[str, str], RuleHitStat]:
         """
         Best-effort (0.7/D10): doc thong ke hit-count cua TOAN BO Security Rule tren
@@ -364,6 +448,54 @@ def get_devicegroup_list(config_root: ET.Element) -> List[str]:
             seen.add(nm)
             names.append(nm)
     return names
+
+
+def devicegroup_device_serials(config_root: ET.Element, dg_name: str) -> List[str]:
+    """Serial cua cac firewall duoc gan vao 1 Device Group.
+
+    Vi sao viet RIENG o day thay vi dung lai ham cung ten ben check_rule_pan: 3
+    package cua suite nay **doc lap 100%** ve code/namespace (co
+    tests/test_panorama_infra.py::test_3_package_khong_import_lan_nhau khoa lai).
+    Lan dau tao import cheo tu check_rule_pan va test do da bat ngay.
+
+    Luu y xpath (dung bay da ghi o PHAN 0, muc 6): config Panorama co Device Group
+    o HAI noi - /config/devices/.../device-group/entry (chua object + rulebase
+    THAT) va /config/readonly/... (ban sao chi-doc, thuong CHI co <parent-dg>, va
+    KHONG co <devices>). Lay phai ban readonly thi se tra ve rong -> tool tuong DG
+    khong co firewall nao -> roi ve dung cai loi P1 dang sua. Nen o day UU TIEN
+    TUYET DOI nhanh ngoai <readonly>.
+    """
+    if not dg_name:
+        return []
+    candidates = []
+    for parent in config_root.iter():
+        if parent.tag != 'device-group':
+            continue
+        in_readonly = False
+        # ElementTree khong co con tro len cha -> xac dinh readonly bang cach do
+        # lai tu goc (re so luong node nho nhu config Panorama)
+        for ro in config_root.iter('readonly'):
+            if parent in list(ro.iter()):
+                in_readonly = True
+                break
+        for dg_el in parent.findall('entry'):
+            if dg_el.get('name') == dg_name:
+                candidates.append((in_readonly, dg_el))
+    if not candidates:
+        return []
+    candidates.sort(key=lambda t: t[0])      # False (ngoai readonly) truoc
+    serials: List[str] = []
+    for _ro, dg_el in candidates:
+        dev = dg_el.find('devices')
+        if dev is None:
+            continue
+        for d in dev.findall('entry'):
+            nm = d.get('name')
+            if nm and nm not in serials:
+                serials.append(nm)
+        if serials:
+            break
+    return serials
 
 
 def _dg_parents_from_config(config_root: ET.Element) -> Dict[str, Optional[str]]:
@@ -793,6 +925,16 @@ def fetch_rule_hit_count(panorama_ip: str, api_key: str, target_serial: str,
     goi API); loi thi tra {} (khong raise). Đã sửa 2026-09-02 khoá theo (name, vi_tri) (D9)."""
     client = PanApiClient(panorama_ip, api_key, verify_ssl=verify_ssl)
     return client.fetch_rule_hit_count(target_serial, log_func=log_func)
+
+
+def fetch_rule_hit_count_multi(panorama_ip: str, api_key: str, serials,
+                               verify_ssl: bool = False, log_func=None):
+    """P1 (10/2026): hit-count GOP tren moi firewall cua Device Group.
+
+    Dung ham nay thay cho fetch_rule_hit_count() o moi noi ket luan UNUSED. Xem
+    PanApiClient.fetch_rule_hit_count_multi() va RuleHitStat.hits_known."""
+    client = PanApiClient(panorama_ip, api_key, verify_ssl=verify_ssl)
+    return client.fetch_rule_hit_count_multi(serials, log_func=log_func)
 
 
 def fetch_current_rule_states(panorama_ip: str, api_key: str, verify_ssl: bool = False, log_func=None) -> Optional[Dict[Tuple[str, str], dict]]:

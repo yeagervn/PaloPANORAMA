@@ -333,15 +333,29 @@ def simulate_policy_match(cfg_root, src, dst, port, proto_num):
 
 
 # ------------------------------------------------------- hit-count gia lap
-def _hit_stat(name, i):
+FIRST_SERIAL = "001122334455"
+
+
+def _hit_stat(name, i, serial=""):
     """Sinh so lieu hit cho 1 rule, theo MARKER TUONG MINH trong ten rule:
-       - ten KET THUC bang '-NOHIT' -> 0 hit, tao 200 ngay truoc
+       - ten KET THUC bang '-NOHIT'  -> 0 hit tren MOI firewall, tao 200 ngay truoc
          => nhanh UNUSED bat duoc, va Import se DISABLE (shadow hit=0)
-       - con lai -> co hit gan day
+       - ten KET THUC bang '-NOHIT1' -> 0 hit CHI TREN FIREWALL DAU TIEN
+         (001122334455), con cac firewall khac trong DG thi DANG DUNG.
+         Day la ca P1: doc hit-count tu 1 serial roi ket luan UNUSED = de xuat
+         XOA mot rule dang chay tren firewall khac trong cung Device Group.
+       - con lai -> co hit gan day tren moi firewall
     Dung marker thay vi doan theo tu khoa ('SHADOW'/'OLD'...) de ten rule trong
-    fixture khong vo tinh dinh nham - loi nay da tung lam sai 1 ca kiem thu."""
+    fixture khong vo tinh dinh nham - loi nay da tung lam sai 1 ca kiem thu.
+    LUU Y thu tu kiem: '-NOHIT1' phai duoc kiem TRUOC '-NOHIT' (neu khong thi
+    endswith('-NOHIT') khong bao gio trung '-NOHIT1', nhung de ro rang van tach)."""
     now = int(datetime.datetime.now().timestamp())
-    if (name or "").upper().endswith("-NOHIT"):
+    up = (name or "").upper()
+    if up.endswith("-NOHIT1"):
+        if serial == FIRST_SERIAL or not serial:
+            return 0, 0, now - 200 * 86400
+        return 500 + i, now - 1 * 86400, now - 200 * 86400
+    if up.endswith("-NOHIT"):
         return 0, 0, now - 200 * 86400
     return 100 + i, now - 2 * 86400, now - 300 * 86400
 
@@ -352,7 +366,7 @@ def _rules_el(container, rb):
     return container.find(f"{rb}-rulebase/security/rules")
 
 
-def hit_count_payload(cfg_root, cmd):
+def hit_count_payload(cfg_root, cmd, target=""):
     """Tra ve response rule-hit-count PHAN CHIEU DUNG PHAM VI MA REQUEST HOI,
     giong cach PAN-OS tra loi lenh op (lồng lại đúng cây device-group/shared +
     pre|post-rulebase/entry[@name='security']/rules), de product phai tu suy
@@ -377,7 +391,7 @@ def hit_count_payload(cfg_root, cmd):
         rows = []
         for e in rules.findall("entry"):
             nm = e.get("name") or ""
-            hc, last, created = _hit_stat(nm, idx)
+            hc, last, created = _hit_stat(nm, idx, target)
             idx += 1
             rows.append(
                 f'<entry name="{nm}"><latest>yes</latest>'
@@ -510,7 +524,7 @@ class Handler(BaseHTTPRequestHandler):
                 log("op: rule-hit-count THIEU target -> tra loi (dung nhu Panorama that)")
                 return self._send(err("target is required for this operational command"))
             log(f"op: show rule-hit-count (target={target})")
-            return self._send(ok(hit_count_payload(STATE["running"], cmd)))
+            return self._send(ok(hit_count_payload(STATE["running"], cmd, target)))
         if "security-policy-match" in c:
             # 0.5: chay tren dataplane firewall -> Panorama BAT BUOC co target
             if not target:
