@@ -563,8 +563,20 @@ theo **ô mạnh nhất** của nó (THAM CHIẾU).
 
 - Quét **Security rulebase + NAT rulebase**, với NAT xét **cả ô ĐÃ DỊCH** (`Source Translated` /
   `Destination Translated`) — ô hay bị bỏ sót nhất khi đi tìm *"con này đang NAT ở đâu"*.
-- **CHƯA quét** Policy Based Forwarding, Decryption, QoS, DoS Protection, Authentication → *"không
-  thấy dùng ở đâu"* **CHƯA đủ để đi xóa object**; tool nói thẳng câu này trong kết quả.
+- **Policy Based Forwarding, Decryption, QoS, DoS Protection, Authentication: NGOÀI PHẠM VI, cố
+  ý.** Hệ thống chỉ kiểm soát connection theo **IP/port**, không dùng các policy type đó. Với cấu
+  hình như vậy thì Security + NAT rulebase **chính là toàn bộ** chỗ một address object có thể được
+  dùng tới, nên *"không thấy dùng ở đâu"* là câu trả lời **ĐẦY ĐỦ**. Cảnh báo cũ *"chưa đủ để đi
+  xóa object"* đã **bỏ hẳn** — một cảnh báo đúng về lý thuyết nhưng không đúng với hệ thống đang
+  chạy chỉ làm người đọc nghi ngờ một kết quả vốn đã đủ. Mở lại ở `_scan_rules` nếu sau này bật
+  thêm policy type.
+- **Đổi lại, "không ai dùng" nay là KẾT LUẬN dùng được** (`UNUSED_TAIL`): *"… trong phạm vi Device
+  Group này thì đây là object RÁC, xóa được."* Ba chốt chặn đi kèm, mỗi cái một test: (1) object
+  còn nằm trong **group** → KHÔNG báo xóa được, PAN-OS từ chối xóa object đang bị tham chiếu;
+  (2) luôn kèm `UNUSED_WARN_DG` — tool chỉ nạp Shared + chuỗi DG **đang chọn**, object có thể đang
+  dùng ở **DG khác** hoặc ở **rule CỤC BỘ trên chính firewall** (ngoài tầm quản lý Panorama, đúng
+  giới hạn III.10 mục 2); (3) object nằm ở tầng **Shared / DG cha** → cảnh báo mạnh hơn
+  (`UNUSED_WARN_SHARED`), vì mọi nhánh DG con đều nhìn thấy nó.
 - Cây group đi ngược lên **tối đa 12 cấp**, chạm trần có cảnh báo.
 - Chưa đo với kho object lớn thật (số đo hiện có đều trên mock Panorama của testlab).
 

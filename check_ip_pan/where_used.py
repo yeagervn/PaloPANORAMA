@@ -40,6 +40,17 @@ BON CHO PAN-OS KHAC HAN CHECK POINT (va deu da thanh test rieng)
    ban o tang xa se KHONG doi gi o DG nay. Day la cho de sai nhat cua ban
    Panorama: nguoi dung sua dung ten object, dung gia tri, nhung sai TANG.
 
+PHAM VI: SECURITY + NAT, VA THE LA DU
+=====================================
+He thong chi kiem soat connection theo IP/port (L3-L4) - khong dung Policy
+Based Forwarding, Decryption, QoS, DoS Protection, Authentication Policy. Voi
+cau hinh do thi Security rulebase + NAT rulebase chinh la TOAN BO cho mot
+address object co the duoc dung toi, nen "khong thay dung o dau" o day la cau
+tra loi DAY DU, khong phai cau tra loi mot phan - xem `UNUSED_TAIL`.
+
+Neu sau nay co bat them policy type thi day la cho mo lai: `_scan_rules` chi
+nhan mot danh sach rule, them mot rulebase nua la them mot loi goi.
+
 NGOAI RA, BAN PANORAMA CON IN THEM VI TRI RULE
 ==============================================
 Moi rule deu thuoc mot trong 4 vi tri: Shared-PRE, <DG>-PRE, <DG>-POST,
@@ -57,6 +68,24 @@ from .core import (AddressGroup, AddressObject, NatRule, SecurityRule,
 # Tran do sau khi di nguoc len cay group. Config that co the long vong (PAN-OS
 # chan phan lon truong hop nhung API van co the nhan), nen van phai co tran.
 MAX_GROUP_DEPTH = 12
+
+# Cau ket luan khi mot object KHONG duoc gi dung toi. Tach thanh hang so vi no
+# la KET LUAN nguoi dung se hanh dong theo (di xoa object), nen phai sua o dung
+# mot cho va co test rieng.
+UNUSED_TAIL = (
+    "He thong chi kiem soat theo IP/port nen Security + NAT la toan bo cho mot "
+    "object co the duoc dung - trong pham vi Device Group nay thi day la object "
+    "RAC, xoa duoc.")
+# HAI cho tool THAT SU chua thay, rieng cua ban Panorama. Khac han may policy
+# type khong bat: day la han che co that cua cach tool nap du lieu.
+UNUSED_WARN_DG = (
+    "Luu y: tool chi nap Shared + chuoi Device Group DANG CHON - object nay co "
+    "the dang duoc dung o Device Group KHAC, hoac o rule CUC BO tren chinh "
+    "firewall (ngoai tam quan ly Panorama).")
+UNUSED_WARN_SHARED = (
+    "CAN THAN: object nay nam o tang Shared / DG cha - MOI Device Group con "
+    "deu nhin thay no. Tool moi kiem duoc chuoi DG dang chon, phai kiem not cac "
+    "nhanh DG con lai truoc khi xoa.")
 
 KIND_REF = "ref"
 KIND_VALUE = "value"
@@ -523,13 +552,38 @@ def where_used_object(name: str,
     report.nat_hits = _scan_nat(nat_rules or [], interest, None, resolver, range_cache)
 
     _layer_note(report, name, layer_of)
-    if not report.rules_by_reference and not report.nat_hits:
-        report.notes.append(
-            f"'{name}' KHONG duoc Security Rule/NAT Rule nao trong pham vi Device "
-            f"Group nay (ca pre lan post-rulebase) goi ten. "
-            f"Luu y: tool moi quet Security + NAT rulebase - chua quet Policy Based "
-            f"Forwarding, Decryption, QoS, DoS, Authentication - nen chua du de di xoa.")
+    _unused_note(report, name, layer_of)
     return report
+
+
+def _unused_note(report: UsageReport, name: str,
+                 layer_of: Optional[Dict[str, List[str]]]) -> None:
+    """Khong ai dung toi -> NOI THANG la xoa duoc, thay vi im lang tra danh
+    sach rong roi de nguoi dung tu doan.
+
+    Phai xet CA GROUP: object con nam trong group thi PAN-OS tu choi xoa, du
+    khong rule nao goi ten group do. Bao xoa duoc luc do la day nguoi dung vao
+    mot thao tac chac chan loi.
+    """
+    if report.rules_by_reference or report.nat_hits:
+        return
+    if report.groups:
+        report.notes.append(
+            f"'{name}' khong rule nao goi ten, NHUNG van nam trong "
+            f"{len(report.groups)} group - phai go khoi group truoc, PAN-OS tu "
+            f"choi xoa object dang con bi tham chieu.")
+        return
+    # Object dinh nghia o tang XA (Shared, hoac o nhieu tang) thi cac nhanh
+    # Device Group KHAC cung nhin thay no - nguy hiem hon han mot object chi
+    # ton tai rieng trong DG dang chon. Thieu thong tin tang thi dung canh bao
+    # chung, vi canh bao chung cung da noi "co the dang dung o DG khac" -
+    # tha canh bao manh hon can thiet con hon canh bao thieu.
+    layers = (layer_of or {}).get(name) or []
+    o_tang_xa = any(l.lower() == "shared" for l in layers) or len(layers) > 1
+    warn = UNUSED_WARN_SHARED if o_tang_xa else UNUSED_WARN_DG
+    report.notes.append(
+        f"'{name}' KHONG rule Security/NAT nao goi ten, cung KHONG nam trong "
+        f"group nao. " + UNUSED_TAIL + " " + warn)
 
 
 def _layer_note(report: UsageReport, name: str,

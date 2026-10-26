@@ -260,11 +260,54 @@ class TestTraTheoTenObject(unittest.TestCase):
         self.assertTrue(rep.empty)
         self.assertTrue(any("Khong co Address Object/Group" in n for n in rep.notes))
 
-    def test_object_khong_ai_dung_thi_canh_bao_CHUA_DU_DE_XOA(self):
-        """Tool moi quet Security + NAT. Khong noi ra thi nguoi dung di xoa
-        object dang duoc PBF/Decryption/QoS dung."""
-        rep = where_used_object("FQ-PORTAL", OBJECTS, GROUPS, RULES, _resolver())
-        self.assertTrue(any("chua du de di xoa" in n for n in rep.notes), rep.notes)
+    def test_object_KHONG_AI_DUNG_thi_ket_luan_duoc_la_XOA_DUOC(self):
+        """He thong chi kiem soat theo IP/port nen Security + NAT la TOAN BO
+        cho mot object co the duoc dung - "khong thay dung o dau" la cau tra
+        loi DAY DU, phai noi thang ra thay vi im lang tra danh sach rong."""
+        from check_ip_pan.where_used import UNUSED_TAIL
+
+        objs = {"RAC": AddressObject("RAC", "ip-netmask", "10.99.99.99/32")}
+        rep = where_used_object("RAC", objs, {}, RULES, GroupResolver(objs, {}, {}))
+        self.assertEqual(rep.rules_by_reference, [])
+        joined = " ".join(rep.notes)
+        self.assertIn("RAC, xoa duoc", joined)
+        self.assertIn(UNUSED_TAIL[:40], joined)
+
+    def test_con_nam_trong_GROUP_thi_KHONG_duoc_bao_la_xoa_duoc(self):
+        """PAN-OS tu choi xoa object dang con bi tham chieu - bao xoa duoc la
+        day nguoi dung vao mot thao tac chac chan loi."""
+        objs = {"RAC": AddressObject("RAC", "ip-netmask", "10.99.99.99/32")}
+        grps = {"G-RAC": AddressGroup("G-RAC", "static", members=["RAC"])}
+        rep = where_used_object("RAC", objs, grps, RULES,
+                                GroupResolver(objs, grps, {}))
+        joined = " ".join(rep.notes)
+        self.assertNotIn("xoa duoc", joined)
+        self.assertIn("go khoi group", joined)
+
+    def test_ket_luan_xoa_duoc_van_canh_bao_DG_KHAC_va_rule_CUC_BO(self):
+        """Hai cho tool THAT SU chua thay, rieng cua ban Panorama - khac han
+        may policy type khong bat, nen van phai giu."""
+        from check_ip_pan.where_used import UNUSED_WARN_DG
+
+        self.assertIn("Device Group KHAC", UNUSED_WARN_DG)
+        self.assertIn("CUC BO", UNUSED_WARN_DG)
+
+    def test_object_o_tang_SHARED_thi_canh_bao_MANH_HON(self):
+        """Object o Shared/DG cha thi MOI nhanh DG con deu nhin thay."""
+        objs = {"RAC": AddressObject("RAC", "ip-netmask", "10.99.99.99/32")}
+        r = GroupResolver(objs, {}, {})
+        xa = where_used_object("RAC", objs, {}, RULES, r,
+                               layer_of={"RAC": ["shared", "DG-HN"]})
+        self.assertIn("CAN THAN", " ".join(xa.notes))
+        gan = where_used_object("RAC", objs, {}, RULES, r,
+                                layer_of={"RAC": ["DG-HN-01"]})
+        self.assertNotIn("CAN THAN", " ".join(gan.notes))
+        self.assertIn("Device Group KHAC", " ".join(gan.notes))
+
+    def test_object_DANG_duoc_dung_thi_khong_bao_xoa_duoc(self):
+        rep = where_used_object("H-WEB", OBJECTS, GROUPS, RULES, _resolver())
+        self.assertTrue(rep.rules_by_reference)
+        self.assertNotIn("xoa duoc", " ".join(rep.notes))
 
 
 class TestChuoiDeviceGroup(unittest.TestCase):
