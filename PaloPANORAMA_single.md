@@ -409,9 +409,10 @@ tắt, không lỗi, không crash. 5. Cập nhật mục XIV trong cùng lần s
 **Không đổi mục tiêu nghiệp vụ**: (1) Tra cứu Security Policy theo danh sách IP (EXACT-HOST
 ONLY, resolve toàn bộ Address Object/Group, không match theo tên, không coi subnet rộng là
 match). (2) Đối chiếu File Log, mô phỏng Test Policy Match. (3) Xuất Excel rich-text theo template
-gốc. (4) Export bảng NAT riêng (Full/Search). Phạm vi tìm kiếm nay là **Shared + Device Group
-đang chọn (cả pre lẫn post-rulebase)** thay vì "1 vsys" — Test Policy Match mô phỏng (III.6, chạy
-OFFLINE, không gọi API thật) dùng đúng thứ tự lắp ráp 0.3.
+gốc. (4) Export bảng NAT riêng (Full/Search). **(5) Mới 2026-10-26: Check Object ("Where Used")**
+— *"IP này đang nằm trong Address Object nào, Group nào, rule nào dùng tới?"* (III.11). Phạm vi
+tìm kiếm nay là **Shared + Device Group đang chọn (cả pre lẫn post-rulebase)** thay vì "1 vsys" —
+Test Policy Match mô phỏng (III.6, chạy OFFLINE, không gọi API thật) dùng đúng thứ tự lắp ráp 0.3.
 
 ## III.1. Kiến trúc module & data flow
 
@@ -504,6 +505,75 @@ Tag, Disabled, Target, HIP, Source User) **giữ nguyên thứ tự và nội du
 3. FQDN address object không resolve được ra IP — loại khỏi match (giữ nguyên).
 4. NAT export: xem giới hạn riêng III.7. Scope nay là Panorama (đã bỏ giới hạn "chỉ 1 Firewall
    độc lập" của bản gốc, đổi thành giới hạn mới ở mục 2 phía trên).
+5. Check Object: xem giới hạn riêng III.11.5.
+
+---
+
+## III.11. Check Object — "Where Used" (mục 5 GUI, `where_used.py`, mới 2026-10-26)
+
+### III.11.1. Vì sao cần, khi đã có Search Rule ở mục 2
+
+Mục 2 trả lời *"rule nào khớp IP này"* rồi **dừng**. Người vận hành còn một câu hỏi nữa, hay hơn
+và khó hơn: *"IP này đang nằm trong object/group nào?"* — vì đó mới là chỗ **phải SỬA** khi muốn
+thêm/bớt quyền, và là chỗ giải thích được **vì sao** một IP đang đi được (hay không đi được).
+
+**Giao diện: mục 5 KHÔNG có ô nhập IP riêng** — nó dùng **CHUNG** danh sách IP của mục 2, cộng
+thêm 1 ô Entry chỉ để gõ **tên** Address Object/Group. Bắt gõ lại cùng một danh sách cho từng việc
+là cách chắc chắn để 2 ô lệch nhau rồi người đọc so sai kết quả. Tick bật mà cả 2 nguồn đều rỗng →
+**CHẶN lại** kèm lý do, không im lặng bỏ qua.
+
+**Phạm vi = Shared + cả chuỗi Device Group đang chọn (pre lẫn post-rulebase), GIỐNG HỆT mục 2** —
+nếu khác thì 2 mục của cùng 1 lượt chạy sẽ trả lời về hai hệ quy chiếu khác nhau.
+
+### III.11.2. BA nhóm "liên quan" — tuyệt đối KHÔNG trộn
+
+| Nhóm | Nghĩa |
+|---|---|
+| **THEO THAM CHIẾU** | rule **gọi tên** object/group có chứa IP, **hoặc** gõ **thẳng** đúng IP đó vào ô Source/Destination |
+| **THEO GIÁ TRỊ** | rule không gọi tên gì liên quan, nhưng ô của nó có 1 value **PHỦ** IP này (subnet rộng) |
+| **CHỈ VÌ `any`** | ô của rule là `any` — **đếm và nói ra, không liệt kê**, nếu không 1 rulebase bình thường ra hàng trăm dòng vô nghĩa |
+
+Một rule **không bao giờ** nằm ở hai nhóm. Rule có 1 bên là tên object + 1 bên là `any` được xếp
+theo **ô mạnh nhất** của nó (THAM CHIẾU).
+
+### III.11.3. Hai thứ RIÊNG của bản Panorama
+
+1. **Chuỗi Device Group — override NHIỀU TẦNG.** Cùng 1 tên có thể tồn tại ở Shared, ở DG cha,
+   VÀ ở DG đang chọn; bản **gần nhất thắng** (luật 0.2). `build_layer_index()` duyệt lại **từng
+   tầng** để dựng `{tên: [tầng theo thứ tự Shared → DG gần nhất]}` — `merge_layered_objects()` đã
+   gộp hết nên **không còn** thông tin này. Kết quả báo: *"'X' được định nghĩa ở 3 tầng: shared →
+   DG-HN → DG-HN-01. Bản của 'DG-HN-01' đang THẮNG (override). Sửa bản ở shared, DG-HN sẽ KHÔNG
+   đổi gì ở Device Group này."* Đây là chỗ dễ sai nhất của bản Panorama: sửa đúng tên, đúng giá
+   trị, nhưng **sai TẦNG** — sửa xong không hiểu vì sao không có tác dụng gì.
+2. **Vị trí rule.** Mỗi rule thuộc 1 trong 4 vị trí `Shared-PRE` / `<DG>-PRE` / `<DG>-POST` /
+   `Shared-POST`, và thứ tự đó quyết định rule nào ẩn rule nào. Kết quả Where Used mang theo
+   `vi_tri` của từng rule, in ra màn hình dạng `#12 R-NAME @DG-HN-PRE [allow] Source ...` và có
+   **cột `Vi tri Panorama` riêng** trong sheet Excel. Thiếu nó là thiếu đúng thứ người đọc cần để
+   biết phải sửa ở đâu.
+
+### III.11.4. Hai chỗ PAN-OS khác hẳn Check Point (chung với bản standalone)
+
+1. **IP gõ THẲNG vào rule** (PAN-OS không bắt buộc phải có Address Object) → tính là **THAM
+   CHIẾU**, không phải theo giá trị.
+2. **FQDN Object** và **Dynamic Address Group không lấy được registered-ip tag** → câu trả lời là
+   **KHÔNG BIẾT**, không phải "không". Tool nói ra thay vì im lặng bỏ — đây là lúc kết quả "không
+   thấy dùng ở đâu" nguy hiểm nhất, vì nó trông y hệt sự thật.
+
+### III.11.5. Phạm vi quét, và chỗ CHƯA làm
+
+- Quét **Security rulebase + NAT rulebase**, với NAT xét **cả ô ĐÃ DỊCH** (`Source Translated` /
+  `Destination Translated`) — ô hay bị bỏ sót nhất khi đi tìm *"con này đang NAT ở đâu"*.
+- **CHƯA quét** Policy Based Forwarding, Decryption, QoS, DoS Protection, Authentication → *"không
+  thấy dùng ở đâu"* **CHƯA đủ để đi xóa object**; tool nói thẳng câu này trong kết quả.
+- Cây group đi ngược lên **tối đa 12 cấp**, chạm trần có cảnh báo.
+- Chưa đo với kho object lớn thật (số đo hiện có đều trên mock Panorama của testlab).
+
+### III.11.6. Đầu ra
+
+**IN THẲNG ra ô Log của GUI** (`format_report()`) — yêu cầu chính: đọc được **ngay**, file Excel
+chỉ là bản lưu. Nhóm quá dài thì cắt bớt nhưng **nói rõ còn bao nhiêu**. Chạy cùng mục 2 (+ mục 4)
+trong 1 lượt → **1 file duy nhất tối đa 3 sheet** `Security Rules` + `NAT Rules` +
+`Object Where Used`, tên file `rule[_nat][_object][_search]_<ts>.xlsx` nói đúng nó chứa gì.
 
 ---
 

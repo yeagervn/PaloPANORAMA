@@ -25,6 +25,7 @@ from .core import (
 from .resolver_engine import GroupResolver, _resolve_service_leaves
 from .pan_api import (
     merge_layered_objects, assemble_security_rules, assemble_nat_rules,
+    resolve_devicegroup_chain, parse_address_objects, parse_address_groups,
 )
 
 # ============================================================================
@@ -260,6 +261,82 @@ def run_nat_export_pipeline(config_root: ET.Element, dg_name: str, log_func,
         resolver = GroupResolver(address_objects, address_groups, registered_ip_tags, log_func)
 
     return nat_rules, resolver, service_objects, service_groups
+
+# ============================================================================
+# CHECK OBJECT (muc 5 GUI) - "Where Used" cho 1 IP hoac 1 ten object
+# ============================================================================
+def build_layer_index(config_root: ET.Element, dg_name: str) -> Dict[str, List[str]]:
+    """{ten object/group: [tang dinh nghia no, theo thu tu Shared -> DG gan nhat]}.
+
+    RIENG CUA BAN PANORAMA. Cung 1 ten co the ton tai o nhieu tang; ban GAN
+    NHAT thang (luat 0.2). Day la cho de sai nhat khi sua cau hinh: dung ten,
+    dung gia tri, nhung sai TANG - sua xong khong hieu vi sao khong tac dung.
+    `merge_layered_objects` da gop het lai nen KHONG con thong tin nay, phai
+    duyet lai tung tang de dung chi muc.
+    """
+    chain_names, chain_els = resolve_devicegroup_chain(config_root, dg_name)
+    index: Dict[str, List[str]] = {}
+    for label, el in zip(chain_names, chain_els):
+        if el is None:
+            continue
+        for name in list(parse_address_objects(el)) + list(parse_address_groups(el)):
+            index.setdefault(name, []).append(label)
+    return index
+
+
+def run_where_used_pipeline(config_root: ET.Element, dg_name: str,
+                             ips: List[str], names: List[str], log_func,
+                             registered_ip_tags: Optional[Dict[str, Set[str]]] = None,
+                             resolver: Optional["GroupResolver"] = None,
+                             rules: Optional[List[SecurityRule]] = None,
+                             nat_rules: Optional[List[NatRule]] = None,
+                             cancel_event: Optional[threading.Event] = None):
+    """Pipeline cho tinh nang Check Object: tra TUNG IP va TUNG ten object.
+
+    Pham vi = Shared + ca chuoi Device Group dang chon (ca pre lan post-
+    rulebase), giong het pham vi cua muc 2 - neu khac thi 2 muc cua CUNG 1 luot
+    chay se tra loi ve hai he quy chieu khac nhau.
+
+    Tai su dung toi da nhung gi luot chay nay da lam: `resolver` (va cache
+    resolve nang nhat ve CPU trong do), `rules`, `nat_rules`.
+    """
+    from .where_used import build_parent_index, where_used_ip, where_used_object
+
+    address_objects, address_groups, _so, _sg = parse_dg_objects(
+        config_root, dg_name, log_func)
+    layer_of = build_layer_index(config_root, dg_name)
+
+    if resolver is None:
+        resolver = GroupResolver(address_objects, address_groups, registered_ip_tags, log_func)
+    if rules is None:
+        rules = assemble_security_rules(config_root, dg_name)
+    if nat_rules is None:
+        nat_rules = assemble_nat_rules(config_root, dg_name)
+
+    parents = build_parent_index(address_groups)
+    range_cache: Dict[str, List[Tuple[int, int]]] = {}
+    log_func(f"[Check Object] {len(address_objects)} object, {len(address_groups)} group, "
+             f"{len(rules)} security rule, {len(nat_rules)} NAT rule - "
+             f"Device Group '{dg_name}'")
+
+    reports = []
+    for ip in ips:
+        if cancel_event is not None and cancel_event.is_set():
+            return reports
+        reports.append(where_used_ip(
+            ip, address_objects, address_groups, rules, resolver,
+            nat_rules=nat_rules, parents=parents, layer_of=layer_of,
+            range_cache=range_cache))
+    for name in names:
+        if cancel_event is not None and cancel_event.is_set():
+            return reports
+        reports.append(where_used_object(
+            name, address_objects, address_groups, rules, resolver,
+            nat_rules=nat_rules, parents=parents, layer_of=layer_of,
+            range_cache=range_cache))
+    log_func(f"[Check Object] Tra xong {len(reports)} muc")
+    return reports
+
 
 # ============================================================================
 # MO PHONG 'TEST POLICY MATCH' CUA PAN-OS CHO DOI CHIEU FILE LOG

@@ -796,13 +796,14 @@ def export_combined_to_excel(output_dir: str,
                               resolver: GroupResolver,
                               service_objects: Dict[str, ServiceObject],
                               service_groups: Dict[str, ServiceGroup],
-                              nat_rules: List[NatRule],
-                              nat_resolver: GroupResolver,
-                              nat_service_objects: Dict[str, ServiceObject],
-                              nat_service_groups: Dict[str, ServiceGroup],
+                              nat_rules: Optional[List[NatRule]] = None,
+                              nat_resolver: Optional[GroupResolver] = None,
+                              nat_service_objects: Optional[Dict[str, ServiceObject]] = None,
+                              nat_service_groups: Optional[Dict[str, ServiceGroup]] = None,
                               log_entries: Optional[List[LogEntry]] = None,
                               highlight_ips: Optional[Set[str]] = None,
                               filter_ips: Optional[Set[str]] = None,
+                              where_reports=None,
                               log_func=None) -> str:
     """Khi 1 luot chay lam CA Check Rule LAN Export NAT -> gop vao DUNG 1 file
     .xlsx co 2 sheet thay vi sinh 2 file roi rac:
@@ -821,17 +822,33 @@ def export_combined_to_excel(output_dir: str,
                           service_objects, service_groups,
                           log_entries=log_entries, log_func=log_func, _wb_only=True)
     wb.worksheets[0].title = RULE_SHEET_TITLE
+    sheet_names = [RULE_SHEET_TITLE]
 
-    export_nat_to_excel(output_dir, nat_rules, nat_resolver,
-                         nat_service_objects, nat_service_groups,
-                         highlight_ips=highlight_ips, filter_ips=filter_ips,
-                         log_func=log_func, _into_wb=wb, _wb_only=True)
+    if nat_rules is not None:
+        export_nat_to_excel(output_dir, nat_rules, nat_resolver,
+                             nat_service_objects or {}, nat_service_groups or {},
+                             highlight_ips=highlight_ips, filter_ips=filter_ips,
+                             log_func=log_func, _into_wb=wb, _wb_only=True)
+        sheet_names.append(NAT_SHEET_TITLE)
 
-    prefix = "rule_nat_search" if filter_ips else "rule_nat"
+    if where_reports:
+        export_where_used_to_excel(output_dir, where_reports,
+                                    log_func=log_func, _into_wb=wb, _wb_only=True)
+        sheet_names.append(WHERE_SHEET_TITLE)
+
+    # Ten file noi dung no chua gi - nguoi dung mo thu muc output sau 1 ngay
+    # khong con nho luot nao chay cai gi.
+    parts = ["rule"]
+    if nat_rules is not None:
+        parts.append("nat")
+    if where_reports:
+        parts.append("object")
+    prefix = "_".join(parts) + ("_search" if filter_ips else "")
     filename = f"{prefix}_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
     output_path = os.path.join(output_dir, filename)
     wb.save(output_path)
-    log_func(f"Export OK -> {filename} (2 sheet: {RULE_SHEET_TITLE} + {NAT_SHEET_TITLE})")
+    log_func(f"Export OK -> {filename} ({len(sheet_names)} sheet: "
+             + " + ".join(sheet_names) + ")")
     return output_path
 
 
@@ -896,4 +913,148 @@ def export_nat_to_csv(output_dir: str, nat_rules: List[NatRule], resolver: Group
     else:
         log_func(f"Export NAT (Full) OK -> {filename} ({len(rules_to_export)} rule)"
                  + (f" - highlight {len(highlight_ips)} IP nhap tay (boc *...*)" if highlight_ips else ""))
+    return output_path
+
+
+# ============================================================================
+# CHECK OBJECT (muc 5) - sheet "Object Where Used"
+# ============================================================================
+WHERE_SHEET_TITLE = "Object Where Used"
+# RIENG BAN PANORAMA: co them cot "Vi tri Panorama" (Shared-PRE / <DG>-PRE /
+# <DG>-POST / Shared-POST). Thu tu 4 vi tri nay quyet dinh rule nao an rule
+# nao, nen thieu no la thieu dung thu nguoi doc can de biet phai sua o dau.
+WHERE_HEADERS = [
+    "Da tra", "Nhom ket qua", "Ten", "Loai", "Gia tri / Duong dan",
+    "Vi tri Panorama", "Thu tu / Cap", "Action", "O khop",
+    "Qua (vi sao dinh)", "Ghi chu",
+]
+# Mau nen tach 3 NHOM ket qua. 3 nhom nay co do tin cay khac han nhau, de
+# chung mot mau thi nguoi doc phai doc tung dong moi biet dong nao la dong
+# nao - dung thu de sai nhat khi copy sang ticket.
+_WHERE_GROUP_FILL = {
+    "OBJECT": "FFDCE6F1",
+    "GROUP": "FFE2EFDA",
+    "RULE (tham chieu)": "FFFFF2CC",
+    "RULE (theo gia tri)": "FFFCE4D6",
+    "RULE (chi vi 'any')": "FFF2F2F2",
+    "NAT RULE": "FFE4DFEC",
+    "GHI CHU": "FFFFFFFF",
+}
+
+
+def _where_rows(report) -> List[List[str]]:
+    """Doi 1 UsageReport thanh cac dong phang de ghi ra Excel/CSV.
+
+    Giu NGUYEN 3 nhom rule rieng bang cot "Nhom ket qua" - do la thong tin
+    chinh cua tinh nang nay, khong duoc lam phang mat.
+    """
+    q = report.query
+    rows: List[List[str]] = []
+    for hit in report.objects:
+        rows.append([q, "OBJECT", hit.name, hit.kind, hit.value, "", "", "", "",
+                     hit.kind_text, hit.note])
+    for hit in report.groups:
+        rows.append([q, "GROUP", hit.name, f"address-group ({hit.group_kind})",
+                     hit.path_text, "", f"cap {hit.depth}", "", "", "", hit.note])
+    for label, bucket in (("RULE (tham chieu)", report.rules_by_reference),
+                          ("RULE (theo gia tri)", report.rules_by_value),
+                          ("RULE (chi vi 'any')", report.rules_by_any)):
+        for hit in bucket:
+            rows.append([q, label, hit.rule_name, "security-rule", "",
+                         hit.vi_tri, f"#{hit.rule_index}", hit.action,
+                         hit.side_text, hit.via,
+                         "DISABLED" if hit.disabled else ""])
+    for hit in report.nat_hits:
+        rows.append([q, "NAT RULE", hit.rule_name, "nat-rule", "",
+                     hit.vi_tri, f"#{hit.rule_index}", "", hit.side_text,
+                     hit.via, "DISABLED" if hit.disabled else ""])
+    for note in report.notes:
+        rows.append([q, "GHI CHU", "", "", "", "", "", "", "", "", note])
+    if not rows:
+        rows.append([q, "GHI CHU", "", "", "", "", "", "", "", "",
+                     "Khong tim thay gi lien quan."])
+    return rows
+
+
+def export_where_used_to_excel(output_dir: str, reports, log_func=None,
+                                _into_wb=None, _wb_only: bool = False):
+    """Xuat ket qua Check Object ra 1 file .xlsx (hoac 1 sheet cua file gop).
+
+    `_into_wb` / `_wb_only`: giong het export_nat_to_excel - de luot chay lam
+    nhieu phan cung luc van ra DUNG 1 file nhieu sheet."""
+    log_func = log_func or (lambda msg: None)
+    os.makedirs(output_dir, exist_ok=True)
+
+    if _into_wb is not None:
+        wb = _into_wb
+        ws = wb.create_sheet(WHERE_SHEET_TITLE)
+    else:
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = WHERE_SHEET_TITLE
+
+    from openpyxl.styles import PatternFill
+
+    header_font = Font(bold=True, color="FFFFFFFF")
+    header_fill = PatternFill(fill_type="solid", fgColor="FF305496")
+    header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    data_align = Alignment(horizontal="left", vertical="top")
+    wrap_align = Alignment(horizontal="left", vertical="top", wrap_text=True)
+    note_font = Font(italic=True, color="FF9C5700")
+    disabled_font = Font(bold=True, color="FFFF0000")
+
+    widths = [20, 20, 34, 22, 46, 16, 12, 12, 24, 40, 60]
+    for col, htext in enumerate(WHERE_HEADERS, start=1):
+        c = ws.cell(row=1, column=col, value=htext)
+        c.font = header_font
+        c.fill = header_fill
+        c.alignment = header_align
+        ws.column_dimensions[get_column_letter(col)].width = widths[col - 1]
+    ws.freeze_panes = "A2"
+
+    row_idx = 1
+    total = 0
+    for report in reports or []:
+        for values in _where_rows(report):
+            row_idx += 1
+            total += 1
+            fill_hex = _WHERE_GROUP_FILL.get(values[1])
+            for col, val in enumerate(values, start=1):
+                c = ws.cell(row=row_idx, column=col, value=val)
+                c.alignment = wrap_align if col in (5, 10, 11) else data_align
+                if fill_hex and fill_hex != "FFFFFFFF":
+                    c.fill = PatternFill(fill_type="solid", fgColor=fill_hex)
+                if values[1] == "GHI CHU":
+                    c.font = note_font
+                elif col == 11 and val == "DISABLED":
+                    c.font = disabled_font
+
+    if _wb_only:
+        log_func(f"Sheet {WHERE_SHEET_TITLE} da san sang ({total} dong, "
+                 f"{len(reports or [])} muc da tra)")
+        return wb
+
+    filename = f"object_where_used_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+    output_path = os.path.join(output_dir, filename)
+    wb.save(output_path)
+    log_func(f"Export Check Object OK -> {filename} ({total} dong, "
+             f"{len(reports or [])} muc da tra)")
+    return output_path
+
+
+def export_where_used_to_csv(output_dir: str, reports, log_func=None) -> str:
+    """Ban CSV cua sheet tren - dung khi luot chay chon dinh dang csv o muc 4."""
+    log_func = log_func or (lambda msg: None)
+    os.makedirs(output_dir, exist_ok=True)
+    filename = f"object_where_used_{datetime.now():%Y%m%d_%H%M%S}.csv"
+    output_path = os.path.join(output_dir, filename)
+    total = 0
+    with open(output_path, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(WHERE_HEADERS)
+        for report in reports or []:
+            for values in _where_rows(report):
+                writer.writerow(values)
+                total += 1
+    log_func(f"Export Check Object OK -> {filename} ({total} dong)")
     return output_path

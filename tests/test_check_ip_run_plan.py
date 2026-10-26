@@ -21,8 +21,9 @@ from check_ip_pan.core import build_run_plan, describe_run_plan, DEFAULT_WORKERS
 
 
 def plan_of(ip_text="", logfile="", nat_full=False, nat_ip_text="",
-            nat_format="xlsx", workers=30):
-    return build_run_plan(ip_text, logfile, nat_full, nat_ip_text, nat_format, workers)
+            nat_format="xlsx", workers=30, where_on=False, where_names=""):
+    return build_run_plan(ip_text, logfile, nat_full, nat_ip_text, nat_format,
+                          workers, where_on, where_names)
 
 
 class TestOnlyRule(unittest.TestCase):
@@ -140,7 +141,7 @@ class TestWorkerClamp(unittest.TestCase):
 class TestDescribe(unittest.TestCase):
     def test_mo_ta_tung_truong_hop(self):
         self.assertEqual(describe_run_plan(plan_of()[0]),
-                         "Chua co gi de chay (xem muc 2/3/4)")
+                         "Chua co gi de chay (xem muc 2/3/4/5)")
         self.assertEqual(describe_run_plan(plan_of(ip_text="10.1.1.1")[0]),
                          "Se chay: Check Rule (1 IP)")
         self.assertEqual(describe_run_plan(plan_of(nat_full=True)[0]),
@@ -148,6 +149,63 @@ class TestDescribe(unittest.TestCase):
         self.assertEqual(
             describe_run_plan(plan_of(ip_text="10.1.1.1", nat_ip_text="10.9.9.9")[0]),
             "Se chay: Check Rule (1 IP) + Export NAT (Search 1 IP)")
+        self.assertEqual(
+            describe_run_plan(plan_of(ip_text="10.1.1.1", where_on=True)[0]),
+            "Se chay: Check Rule (1 IP) + Check Object (1 IP)")
+        self.assertEqual(
+            describe_run_plan(plan_of(where_on=True, where_names="G-WEB")[0]),
+            "Se chay: Check Object (1 ten object)")
+
+
+class TestCheckObject(unittest.TestCase):
+    """Muc 5 - Check Object (Where Used).
+
+    Rang buoc chinh cua thiet ke: KHONG co o nhap IP thu hai. Muc 5 dung CHUNG
+    danh sach IP cua muc 2, nen khong co duong nao de 2 o lech nhau roi nguoi
+    doc so sai ket qua.
+    """
+
+    def test_dung_chung_danh_sach_IP_cua_muc_2(self):
+        plan, errors = plan_of(ip_text="10.1.1.1\n10.1.1.2", where_on=True)
+        self.assertEqual(errors, [])
+        self.assertTrue(plan["do_where"])
+        self.assertEqual(plan["where_ips"], plan["valid_ips"])
+        self.assertEqual(plan["where_ips"], ["10.1.1.1", "10.1.1.2"])
+
+    def test_chay_duoc_voi_CHI_ten_object(self):
+        plan, errors = plan_of(where_on=True, where_names="G-WEB, OBJ-DB")
+        self.assertEqual(errors, [])
+        self.assertTrue(plan["do_where"])
+        self.assertFalse(plan["do_rule"])
+        self.assertEqual(plan["where_names"], ["G-WEB", "OBJ-DB"])
+
+    def test_tick_bat_ma_khong_co_gi_de_tra_thi_CHAN_LAI(self):
+        """Tick roi bam Run ma lang le khong ra gi la loi te nhat cua giao dien:
+        nguoi vua tick la dang mong no chay."""
+        plan, errors = plan_of(where_on=True)
+        self.assertFalse(plan["do_where"])
+        self.assertTrue(any("Muc 5" in e for e in errors), errors)
+
+    def test_khong_tick_thi_khong_chay_du_co_IP(self):
+        plan, errors = plan_of(ip_text="10.1.1.1", where_on=False)
+        self.assertEqual(errors, [])
+        self.assertFalse(plan["do_where"])
+        self.assertEqual(plan["where_ips"], [])
+
+    def test_ten_object_khu_trung_lap_nhung_giu_thu_tu_go(self):
+        plan, _ = plan_of(where_on=True, where_names="B, A, B, C")
+        self.assertEqual(plan["where_names"], ["B", "A", "C"])
+
+    def test_ten_object_GIU_NGUYEN_hoa_thuong(self):
+        """Ten object cua PAN-OS phan biet hoa/thuong - ep chu thuong la tra
+        nham object hoac bao 'khong tim thay' cho object co that."""
+        plan, _ = plan_of(where_on=True, where_names="G-Web")
+        self.assertEqual(plan["where_names"], ["G-Web"])
+
+    def test_tach_duoc_ca_dau_phay_lan_xuong_dong(self):
+        plan, _ = plan_of(where_on=True, where_names="A,B\nC;D")
+        self.assertEqual(plan["where_names"], ["A", "B", "C", "D"])
+
 
 
 if __name__ == "__main__":

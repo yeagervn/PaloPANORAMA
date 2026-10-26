@@ -450,6 +450,70 @@ def tab_check_ip(host, key):
     wb = openpyxl.load_workbook(p_comb)
     check("Gop 1 FILE 2 SHEET khi chay ca Rule lan NAT",
           wb.sheetnames == [RULE_SHEET_TITLE, NAT_SHEET_TITLE], str(wb.sheetnames))
+
+    # --- MUC 5: CHECK OBJECT (Where Used) ---------------------------------
+    from check_ip_pan.matching_engine import (build_layer_index,
+                                               run_where_used_pipeline)
+    from check_ip_pan.excel_export import (export_where_used_to_excel,
+                                            WHERE_SHEET_TITLE)
+    from check_ip_pan.where_used import format_report
+
+    pw, ew = build_run_plan(ip_text, "", False, "", "xlsx", 30, True, "")
+    check("Muc 5 dung CHUNG danh sach IP cua muc 2 (khong co o IP thu hai)",
+          pw["do_where"] and pw["where_ips"] == pw["valid_ips"] and not ew,
+          f"{len(pw['where_ips'])} IP")
+    _pw2, ew2 = build_run_plan("", "", False, "", "xlsx", 30, True, "")
+    check("Tick muc 5 ma khong co gi de tra -> CHAN lai, khong im lang bo qua",
+          any("Muc 5" in e for e in ew2), ew2[0].splitlines()[0] if ew2 else "")
+
+    layer_of = build_layer_index(root, DG)
+    check("Chi muc TANG (Shared -> DG cha -> DG) dung duoc cho ca kho object",
+          bool(layer_of) and all(isinstance(v, list) and v for v in layer_of.values()),
+          f"{len(layer_of)} ten co tang")
+
+    reports = run_where_used_pipeline(
+        root, DG, ["10.10.10.11"], [], log_func=lambda m: None,
+        registered_ip_tags=tags, resolver=resolver, rules=rules, nat_rules=nat_rules)
+    rep = reports[0]
+    check("Check Object: tim duoc Address Object mang IP",
+          bool(rep.objects), f"{len(rep.objects)} object")
+    check("Check Object: TACH RIENG tham chieu / theo gia tri / chi vi 'any'",
+          not ({h.rule_index for h in rep.rules_by_reference}
+               & {h.rule_index for h in rep.rules_by_value}
+               | {h.rule_index for h in rep.rules_by_reference}
+               & {h.rule_index for h in rep.rules_by_any}),
+          f"ref={len(rep.rules_by_reference)} value={len(rep.rules_by_value)} "
+          f"any={len(rep.rules_by_any)}")
+    check("Check Object: ket qua mang theo VI TRI rule (rieng ban Panorama)",
+          all(h.vi_tri for h in rep.rules_by_reference) if rep.rules_by_reference
+          else True,
+          ", ".join(sorted({h.vi_tri for h in rep.rules_by_reference})) or "(khong co)")
+    check("Check Object: quet ca bang NAT (ke ca o DA DICH)",
+          isinstance(rep.nat_hits, list), f"{len(rep.nat_hits)} NAT rule")
+    check("Check Object: IN THANG ket qua ra man hinh duoc",
+          any("10.10.10.11" in ln for ln in format_report(rep)),
+          f"{len(format_report(rep))} dong")
+
+    rep_bad = run_where_used_pipeline(
+        root, DG, [], ["KHONG-CO-OBJECT-NAY"], log_func=lambda m: None,
+        registered_ip_tags=tags, resolver=resolver, rules=rules, nat_rules=nat_rules)[0]
+    check("Check Object: ten object khong ton tai -> NOI RO, khong tra rong",
+          rep_bad.empty and bool(rep_bad.notes),
+          rep_bad.notes[0][:60] if rep_bad.notes else "(khong co ghi chu)")
+
+    p_where = export_where_used_to_excel(OUT, reports, log_func=lambda m: None)
+    check("Xuat Excel Check Object", os.path.exists(p_where), os.path.basename(p_where))
+
+    p_all = export_combined_to_excel(
+        OUT, rules=rules, match_results=match, resolver=resolver,
+        service_objects=so, service_groups=sg,
+        nat_rules=nat_rules, nat_resolver=nat_res,
+        nat_service_objects=nso, nat_service_groups=nsg,
+        log_entries=logs, where_reports=reports, log_func=lambda m: None)
+    wb3 = openpyxl.load_workbook(p_all)
+    check("Gop 1 FILE 3 SHEET khi chay ca Rule + NAT + Check Object",
+          wb3.sheetnames == [RULE_SHEET_TITLE, NAT_SHEET_TITLE, WHERE_SHEET_TITLE],
+          str(wb3.sheetnames))
     return p_comb
 
 

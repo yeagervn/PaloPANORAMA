@@ -228,6 +228,53 @@ class TestCheckIpGuiEndToEnd(unittest.TestCase):
         self.assertTrue(any(n == "showinfo" for n, _ in dialogs.calls),
                         "chay xong khong bao cho nguoi dung biet file o dau")
 
+    def test_check_object_in_ra_man_hinh_va_them_sheet(self):
+        """Muc 5 - Check Object. Hai thu phai co, va day la 2 thu khac nhau:
+        (1) ket qua IN THANG ra o Log - yeu cau chinh cua nguoi dung, ho muon
+            doc duoc ngay chu khong phai mo file;
+        (2) sheet "Object Where Used" trong file da xuat - ban luu lai.
+        """
+        import check_ip_pan.gui as gui_mod
+
+        root, app = self._new_app()
+        with _NoDialogs(gui_mod):
+            self._connect(root, app)
+            app.cmb_dg.set("DG-HN")
+
+            with open(os.path.join(ROOT, "testlab", "samples", "ip_list.txt"),
+                      encoding="utf-8") as f:
+                ips = f.read()
+            app.txt_ips.delete("1.0", "end")
+            app.txt_ips.insert("1.0", ips)
+            app.var_export_nat.set("No")
+            app.txt_nat_ips.delete("1.0", "end")
+            app.var_where_used.set(True)          # <- muc 5
+            app._refresh_plan_hint()
+            self.assertIn("Check Object", app.lbl_plan.cget("text"),
+                          "tick muc 5 ma nhan canh nut Run khong doi")
+
+            before = set(self._before)
+            app._on_run_all()
+            self._pump(root, lambda: str(app.btn_run.cget("state")) == "normal",
+                       label="chay xong va mo khoa lai UI")
+
+            shown = app.txt_log.get("1.0", "end")
+
+        self.assertIn("KET QUA CHECK OBJECT", shown,
+                      "khong in ket qua Check Object ra man hinh")
+        self.assertIn("Address Object", shown)
+
+        new_files = sorted(set(os.listdir(self.out_dir)) - before)
+        xlsx = [f for f in new_files if f.endswith(".xlsx")]
+        self.assertTrue(xlsx, f"khong co file .xlsx nao trong {new_files}")
+
+        import openpyxl
+        wb = openpyxl.load_workbook(os.path.join(self.out_dir, xlsx[0]))
+        self.assertIn("Object Where Used", wb.sheetnames, wb.sheetnames)
+        self.assertGreater(wb["Object Where Used"].max_row, 1,
+                           "sheet Object Where Used rong")
+        wb.close()
+
     def test_run_with_empty_input_does_not_lock_ui(self):
         """De trong het roi bam Run: phai bao va mo khoa UI, khong treo."""
         import check_ip_pan.gui as gui_mod

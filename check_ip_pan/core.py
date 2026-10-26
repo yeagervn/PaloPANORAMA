@@ -449,8 +449,27 @@ def parse_ip_list_input(text: str) -> Tuple[List[str], List[str]]:
     return valid, invalid
 
 
+def parse_object_name_list(text: str) -> List[str]:
+    """Doc o "ten Address Object/Group" cua muc 5 (Check Object).
+
+    Tach theo xuong dong HOAC dau phay, bo trung lap nhung GIU THU TU nguoi
+    dung go - do cung la thu tu ho se doc ket qua. KHONG ep chu thuong: ten
+    object cua PAN-OS phan biet hoa/thuong.
+    """
+    raw: List[str] = []
+    for line in (text or "").replace(";", "\n").split("\n"):
+        for part in line.split(","):
+            name = part.strip()
+            if name:
+                raw.append(name)
+    seen = set()
+    return [n for n in raw if not (n in seen or seen.add(n))]
+
+
 def build_run_plan(ip_text: str, logfile_path: str, nat_mode_full: bool,
-                    nat_ip_text: str, nat_format: str, worker_count_raw) -> Tuple[dict, List[str]]:
+                    nat_ip_text: str, nat_format: str, worker_count_raw,
+                    where_used_on: bool = False,
+                    where_object_text: str = "") -> Tuple[dict, List[str]]:
     """Lap ke hoach + kiem tra input cho 1 luot bam nut "Check / Export" cua tab
     CHECK IP (10/2026 - gop 2 nut "Check" va "Export NAT" thanh 1).
 
@@ -464,6 +483,9 @@ def build_run_plan(ip_text: str, logfile_path: str, nat_mode_full: bool,
         "No (Search)" VA co it nhat 1 IP hop le. De trong o Search -> bo qua phan
         nay, KHONG phai loi.
       - Nhap ca 2 ben -> chay CA HAI trong cung 1 luot (xuat 2 file).
+      - Check Object (muc 5) chay khi: tick bat VA co it nhat 1 IP hop le o muc 2
+        HOAC 1 ten object o o rieng cua muc 5. Tick bat ma KHONG co gi de tra ->
+        errors (nguoi dung vua tick la dang mong no chay, khong duoc im lang bo).
       - Khong ben nao co du lieu -> errors, chan lai.
       - O CO chu nhung KHONG co IP nao hop le -> errors (nguoi dung dinh tim that
         nhung go sai dinh dang, KHONG duoc im lang bo qua).
@@ -489,14 +511,22 @@ def build_run_plan(ip_text: str, logfile_path: str, nat_mode_full: bool,
         errors.append("Muc 4: khong co IP nao hop le (vd sai dinh dang: "
                       + ", ".join(nat_invalid[:5]) + ").")
 
+    where_names = parse_object_name_list(where_object_text)
     do_rule = bool(valid_ips) or bool(logfile_path)
     do_nat = bool(nat_mode_full) or bool(nat_ips)
-
-    if not do_rule and not do_nat:
+    do_where = bool(where_used_on) and (bool(valid_ips) or bool(where_names))
+    if where_used_on and not do_where:
         errors.append(
-            "Chua co gi de chay. Can IT NHAT 1 trong 2:\n"
+            "Muc 5: da bat Check Object nhung khong co gi de tra.\n"
+            "  - Nhap IP o muc 2 (dung CHUNG o do, khong go lai), va/hoac\n"
+            "  - Nhap ten Address Object/Group vao o rieng cua muc 5.")
+
+    if not do_rule and not do_nat and not do_where:
+        errors.append(
+            "Chua co gi de chay. Can IT NHAT 1 trong 3:\n"
             "  - Muc 2 (danh sach IP) va/hoac muc 3 (File Log)  -> Check Rule\n"
-            "  - Muc 4: chon 'Yes (Full)', hoac 'No (Search)' + nhap IP  -> Export NAT")
+            "  - Muc 4: chon 'Yes (Full)', hoac 'No (Search)' + nhap IP  -> Export NAT\n"
+            "  - Muc 5: tick Check Object + co IP (muc 2) hoac ten object  -> Where Used")
 
     try:
         worker_count = int(worker_count_raw)
@@ -507,6 +537,11 @@ def build_run_plan(ip_text: str, logfile_path: str, nat_mode_full: bool,
     plan = {
         "do_rule": do_rule,
         "do_nat": do_nat,
+        "do_where": do_where,
+        # Check Object dung CHUNG danh sach IP cua muc 2 - khong co o IP thu
+        # hai, nen khong co duong nao de 2 o lech nhau roi nguoi doc so sai.
+        "where_ips": valid_ips if do_where else [],
+        "where_names": where_names if do_where else [],
         "valid_ips": valid_ips,
         "invalid_ips": invalid_ips,
         "logfile_path": logfile_path,
@@ -535,8 +570,14 @@ def describe_run_plan(plan: dict) -> str:
         parts.append("Export NAT ({})".format(
             "Full" if plan.get("nat_mode_full")
             else f"Search {len(plan.get('nat_filter_ips') or [])} IP"))
+    if plan.get("do_where"):
+        n_ip = len(plan.get("where_ips") or [])
+        n_name = len(plan.get("where_names") or [])
+        detail = ", ".join(x for x in (f"{n_ip} IP" if n_ip else "",
+                                       f"{n_name} ten object" if n_name else "") if x)
+        parts.append(f"Check Object ({detail})")
     if not parts:
-        return "Chua co gi de chay (xem muc 2/3/4)"
+        return "Chua co gi de chay (xem muc 2/3/4/5)"
     return "Se chay: " + " + ".join(parts)
 
 

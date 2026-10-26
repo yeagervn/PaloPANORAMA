@@ -15,9 +15,12 @@ from tkinter import ttk, filedialog, messagebox, scrolledtext
 from .core import APP_TITLE, OUTPUT_DIR, LOG_PATH, DEFAULT_WORKERS, setup_logger, PanApiError
 from .core import parse_ip_list_input, build_run_plan, describe_run_plan
 from .pan_api import PanApiClient, get_devicegroup_list, resolve_devicegroup_chain
-from .matching_engine import parse_log_file, run_search_pipeline, run_nat_export_pipeline
+from .matching_engine import (parse_log_file, run_search_pipeline,
+                              run_nat_export_pipeline, run_where_used_pipeline)
 from .excel_export import (export_to_excel, export_nat_to_excel, export_nat_to_csv,
-                            export_combined_to_excel)
+                            export_combined_to_excel, export_where_used_to_excel,
+                            export_where_used_to_csv)
+from .where_used import format_report
 
 class App(ttk.Frame):
     """Giao dien tool CHECK IP - dang 1 ttk.Frame de nhung duoc vao bat ky
@@ -137,6 +140,31 @@ class App(ttk.Frame):
         self.txt_nat_ips.grid(row=2, column=0, columnspan=5, sticky="we", padx=6, pady=(0, 4))
         frm_nat.columnconfigure(4, weight=1)
 
+        # MUC 5 - CHECK OBJECT ("Where Used"): 1 IP dang nam trong Address Object
+        # nao, Group nao, rule nao dung toi. KHONG co o nhap IP rieng o day - no
+        # dung CHUNG danh sach IP cua muc 2, vi bat go lai cung 1 danh sach cho
+        # tung viec la cach chac chan de 2 o lech nhau roi nguoi doc so sai.
+        frm_obj = ttk.LabelFrame(
+            self.root,
+            text="5. Check Object (Where Used) - tuy chon (IP lay tu MUC 2; "
+                 "o duoi chi de go THEM ten object/group)")
+        frm_obj.pack(fill="x", **pad)
+        self.var_where_used = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            frm_obj,
+            text="Tra object/group/rule lien quan toi cac IP o muc 2",
+            variable=self.var_where_used,
+            command=self._refresh_plan_hint).grid(row=0, column=0, columnspan=3,
+                                                  sticky="w", padx=6, pady=(4, 0))
+        ttk.Label(frm_obj, text="Ten Address Object/Group:").grid(
+            row=1, column=0, sticky="w", padx=6, pady=4)
+        self.ent_where_objects = ttk.Entry(frm_obj)
+        self.ent_where_objects.grid(row=1, column=1, sticky="we", padx=6, pady=4)
+        frm_obj.columnconfigure(1, weight=1)
+        ttk.Label(frm_obj, text="(tuy chon, nhieu ten cach nhau bang dau phay)",
+                  foreground="#555555").grid(row=1, column=2, sticky="w", padx=6)
+        self.ent_where_objects.bind("<KeyRelease>", lambda e: self._refresh_plan_hint())
+
         # 1 NUT DUY NHAT cho ca 2 viec (thay cho cap "Check" o muc 3 + "Export NAT"
         # o day truoc kia): chay Check Rule neu muc 2 HOAC muc 3 co du lieu, chay
         # Export NAT neu muc 4 duoc chon - nhap ca 2 thi chay ca 2 trong CUNG 1 luot.
@@ -226,6 +254,8 @@ class App(ttk.Frame):
             nat_ip_text=self.txt_nat_ips.get("1.0", "end"),
             nat_format=self.cmb_nat_format.get(),
             worker_count_raw=self.spn_threads.get(),
+            where_used_on=bool(self.var_where_used.get()),
+            where_object_text=self.ent_where_objects.get(),
         )
 
     def _refresh_plan_hint(self):
@@ -234,7 +264,8 @@ class App(ttk.Frame):
         dung paste hang nghin IP)."""
         try:
             sig = (self.txt_ips.get("1.0", "end"), self.ent_logfile.get(),
-                   self.txt_nat_ips.get("1.0", "end"), self.var_export_nat.get())
+                   self.txt_nat_ips.get("1.0", "end"), self.var_export_nat.get(),
+                   self.var_where_used.get(), self.ent_where_objects.get())
         except Exception:
             return
         if sig == getattr(self, "_plan_sig", None):
@@ -426,6 +457,15 @@ class App(ttk.Frame):
             else:
                 self._log("[Muc 4] De trong -> BO QUA Export NAT.")
 
+            where_reports = None
+            if plan["do_where"]:
+                where_reports = self._run_where_used(dg_name, plan, rule_data, nat_data)
+                if self.cancel_event.is_set():
+                    self._log("Da huy theo yeu cau (Cancel)." + self._paths_note(output_paths))
+                    return
+            else:
+                self._log("[Muc 5] Khong bat -> BO QUA Check Object.")
+
             nat_is_csv = (plan["nat_format"] == "csv")
             if rule_data and nat_data and not nat_is_csv:
                 self._set_status("Exporting Excel (Rule + NAT, 1 file 2 sheet)...")
@@ -443,19 +483,36 @@ class App(ttk.Frame):
                     log_entries=rule_data["log_entries"],
                     highlight_ips=nat_data["highlight_ips"],
                     filter_ips=nat_data["filter_ips"],
+                    where_reports=where_reports,
                     log_func=self._log,
                 ))
+                where_reports = None       # da nam trong file gop, khong xuat lai
             else:
                 if rule_data and nat_data and nat_is_csv:
                     self._log("[NAT] Dinh dang CSV khong gop duoc vao file Excel 2 sheet "
                               "-> xuat rieng 2 file (chon 'xlsx' o muc 4 neu muon gop chung).")
                 if rule_data:
                     self._set_status("Exporting Excel (Rule)...")
-                    output_paths.append(export_to_excel(
-                        OUTPUT_DIR, rule_data["rules"], rule_data["match_results"],
-                        rule_data["resolver"], rule_data["service_objects"],
-                        rule_data["service_groups"],
-                        log_entries=rule_data["log_entries"], log_func=self._log))
+                    if where_reports:
+                        # Rule + Check Object cung 1 luot -> 1 file 2 sheet,
+                        # dung co che gop san co (khong viet lai logic export).
+                        output_paths.append(export_combined_to_excel(
+                            OUTPUT_DIR,
+                            rules=rule_data["rules"],
+                            match_results=rule_data["match_results"],
+                            resolver=rule_data["resolver"],
+                            service_objects=rule_data["service_objects"],
+                            service_groups=rule_data["service_groups"],
+                            log_entries=rule_data["log_entries"],
+                            where_reports=where_reports,
+                            log_func=self._log))
+                        where_reports = None
+                    else:
+                        output_paths.append(export_to_excel(
+                            OUTPUT_DIR, rule_data["rules"], rule_data["match_results"],
+                            rule_data["resolver"], rule_data["service_objects"],
+                            rule_data["service_groups"],
+                            log_entries=rule_data["log_entries"], log_func=self._log))
                 if nat_data:
                     self._set_status("Exporting bang NAT ({}, {})...".format(
                         "Full" if plan["nat_mode_full"] else "Search", plan["nat_format"]))
@@ -465,6 +522,12 @@ class App(ttk.Frame):
                         nat_data["service_objects"], nat_data["service_groups"],
                         highlight_ips=nat_data["highlight_ips"],
                         filter_ips=nat_data["filter_ips"], log_func=self._log))
+                if where_reports:
+                    self._set_status("Exporting Check Object...")
+                    exporter = (export_where_used_to_csv if nat_is_csv and nat_data
+                                else export_where_used_to_excel)
+                    output_paths.append(exporter(OUTPUT_DIR, where_reports,
+                                                  log_func=self._log))
 
             self.msg_queue.put(("done_run_all", output_paths))
         except PanApiError as e:
@@ -477,6 +540,40 @@ class App(ttk.Frame):
             self.msg_queue.put(("error", "Da xay ra loi khong xac dinh. Xem log.txt de biet chi tiet."))
         finally:
             self.msg_queue.put(("enable_ui", None))
+
+    def _run_where_used(self, dg_name, plan, rule_data, nat_data):
+        """Muc 5 - Check Object. IN THANG ket qua ra o Log, roi tra ve de xuat file.
+
+        Pham vi = Shared + ca chuoi Device Group dang chon, GIONG HET muc 2 -
+        neu khac thi 2 muc cua cung 1 luot chay se tra loi ve hai he quy chieu
+        khac nhau.
+
+        In ra man hinh la YEU CAU chinh cua tinh nang nay: nguoi dung muon doc
+        duoc ngay, file Excel chi la ban luu lai.
+        """
+        self._set_status("Check Object (Where Used)...")
+        ips = plan["where_ips"]
+        names = plan["where_names"]
+        self._log(f"Bat dau (Check Object): {len(ips)} IP + {len(names)} ten object, "
+                  f"Device Group={dg_name}")
+
+        reports = run_where_used_pipeline(
+            self.config_root, dg_name, ips, names,
+            log_func=self._log,
+            registered_ip_tags=self.registered_ip_tags,
+            resolver=(rule_data or {}).get("resolver") or (nat_data or {}).get("resolver"),
+            rules=(rule_data or {}).get("rules"),
+            nat_rules=(nat_data or {}).get("nat_rules"),
+            cancel_event=self.cancel_event)
+
+        self._log("=" * 70)
+        self._log("KET QUA CHECK OBJECT (Where Used)")
+        self._log("=" * 70)
+        for report in reports:
+            for line in format_report(report):
+                self._log(line)
+        self._log("=" * 70)
+        return reports
 
     def _run_rule_pipeline(self, dg_name, valid_ips, logfile_path, worker_count):
         """Chay pipeline Check Rule (muc 2+3) va TRA VE DU LIEU THO - chua export.
