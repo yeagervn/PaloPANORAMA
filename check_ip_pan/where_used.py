@@ -296,6 +296,18 @@ def _literal_is_exactly(entry: str, ip_int: int) -> bool:
     return net.num_addresses == 1 and int(net.network_address) == ip_int
 
 
+def _join_all(names: Sequence[str], keep: int = 3) -> str:
+    """Ghep ten lam rule dinh, cat bot thi PHAI noi ra con bao nhieu.
+
+    Cat im lang la kieu sai te nhat cua mot tinh nang tra cuu: nguoi doc tuong
+    da thay het roi di ket luan.
+    """
+    uniq = sorted(set(names))
+    if len(uniq) <= keep:
+        return ", ".join(uniq)
+    return ", ".join(uniq[:keep]) + f" (+{len(uniq) - keep} nua)"
+
+
 def _side_kind(entries: Sequence[str], interest: Set[str], ip_int: Optional[int],
                resolver, range_cache: Dict[str, List[Tuple[int, int]]]
                ) -> Tuple[Optional[str], str]:
@@ -327,9 +339,9 @@ def _side_kind(entries: Sequence[str], interest: Set[str], ip_int: Optional[int]
                 via_value.append(entry)
                 break
     if via_ref:
-        return KIND_REF, ", ".join(sorted(set(via_ref))[:3])
+        return KIND_REF, _join_all(via_ref)
     if via_value:
-        return KIND_VALUE, ", ".join(sorted(set(via_value))[:3])
+        return KIND_VALUE, _join_all(via_value)
     if has_any:
         return KIND_ANY, "any"
     return None, ""
@@ -586,25 +598,44 @@ def _add_notes(report: UsageReport, exact_names: List[str], wide_names: List[str
 # ============================================================================
 # IN RA MAN HINH (muc 5 GUI) - hien THANG cho nguoi dung, khong bat mo file
 # ============================================================================
-def format_report(report: UsageReport, max_rules: int = 25) -> List[str]:
+def format_report(report: UsageReport, max_rules: int = 25,
+                  max_items: int = 200) -> List[str]:
     """Dung cac dong chu de do thang vao o Log cua GUI.
 
     Nguoi dung noi ro: "enter vao tool dung cai tinh nang where used co the in
     ra TRUC TIEP cho nguoi dung" - nen ket qua phai doc duoc ngay tren man
     hinh, file Excel chi la ban luu.
+
+    HAI LUAT CUNG CUA PHAN IN NAY
+    =============================
+    1. **Khong bao gio cat im lang.** Cat bot bao nhieu dong thi phai in ra
+       dung so do kem cho xem day du. Mot tinh nang tra cuu ma cat im lang thi
+       nguoi doc tuong da thay het roi di ket luan - sai kieu nguy hiem nhat.
+    2. **Object va Group co tran RIENG, cao hon han rule** (`max_items`, mac
+       dinh 200). Hai muc do chinh la CAU TRA LOI cua tinh nang nay ("IP nay
+       nam trong nhung object/group nao"); cat chung o 25 nhu rule la cat dung
+       cho nguoi ta can doc. File Excel/CSV thi KHONG cat gi het.
     """
+    def _more(total: int, shown: int, what: str) -> None:
+        if total > shown:
+            lines.append(f"       ... va {total - shown} {what} nua "
+                         f"(da cat bot de o Log khong tran - xem DAY DU trong "
+                         f"file Excel/CSV)")
+
     lines: List[str] = [f"  >> {report.query}"]
     if report.objects:
         lines.append(f"     Address Object ({len(report.objects)}):")
-        for hit in report.objects[:max_rules]:
+        for hit in report.objects[:max_items]:
             lines.append(f"       - {hit.name}  [{hit.kind}] {hit.value}"
                          f"  ({hit.kind_text})")
+        _more(len(report.objects), max_items, "object")
     if report.groups:
         lines.append(f"     Address Group ({len(report.groups)}):")
-        for hit in report.groups[:max_rules]:
+        for hit in report.groups[:max_items]:
             extra = f"  <- {hit.note}" if hit.note else ""
             lines.append(f"       - {hit.name}  [{hit.group_kind}, cap {hit.depth}]"
                          f"  {hit.path_text}{extra}")
+        _more(len(report.groups), max_items, "group")
     for title, bucket in (("Security Rule - THEO THAM CHIEU", report.rules_by_reference),
                           ("Security Rule - THEO GIA TRI", report.rules_by_value)):
         if not bucket:
@@ -615,12 +646,10 @@ def format_report(report: UsageReport, max_rules: int = 25) -> List[str]:
             where = f"  @{hit.vi_tri}" if hit.vi_tri else ""
             lines.append(f"       - #{hit.rule_index} {hit.rule_name}{where}"
                          f"  [{hit.action}]{flag}  {hit.side_text}  {hit.via}")
-        if len(bucket) > max_rules:
-            lines.append(f"       ... va {len(bucket) - max_rules} rule nua "
-                         f"(xem day du trong file Excel)")
+        _more(len(bucket), max_rules, "rule")
     if report.rules_by_any:
         lines.append(f"     Security Rule - CHI VI 'any': {len(report.rules_by_any)} rule "
-                     f"(khong liet ke, xem file Excel)")
+                     f"(khong liet ke o day - xem DAY DU trong file Excel/CSV)")
     if report.nat_hits:
         lines.append(f"     NAT Rule ({len(report.nat_hits)}):")
         for hit in report.nat_hits[:max_rules]:
@@ -628,6 +657,7 @@ def format_report(report: UsageReport, max_rules: int = 25) -> List[str]:
             where = f"  @{hit.vi_tri}" if hit.vi_tri else ""
             lines.append(f"       - #{hit.rule_index} {hit.rule_name}{where}{flag}"
                          f"  {hit.side_text}  {hit.via}")
+        _more(len(report.nat_hits), max_rules, "NAT rule")
     for note in report.notes:
         lines.append(f"     (!) {note}")
     if report.empty and not report.notes:

@@ -571,7 +571,17 @@ theo **ô mạnh nhất** của nó (THAM CHIẾU).
 ### III.11.6. Đầu ra
 
 **IN THẲNG ra ô Log của GUI** (`format_report()`) — yêu cầu chính: đọc được **ngay**, file Excel
-chỉ là bản lưu. Nhóm quá dài thì cắt bớt nhưng **nói rõ còn bao nhiêu**. Chạy cùng mục 2 (+ mục 4)
+chỉ là bản lưu.
+
+**KHÔNG BAO GIỜ CẮT IM LẶNG.** Cắt bớt bao nhiêu dòng thì in ra đúng số đó kèm chỗ xem đầy đủ
+(`"... va 100 object nua (da cat bot de o Log khong tran - xem DAY DU trong file Excel/CSV)"`), áp
+dụng cho **mọi** mục: object, group, rule, NAT, và cả ô `qua: …` (`G-A, G-B, G-C (+7 nua)`). Một
+tính năng tra cứu mà cắt im lặng thì người đọc tưởng đã thấy hết rồi đi kết luận. **Object và
+Group có trần riêng, cao hơn hẳn rule** (`max_items=200` so với `max_rules=25`) vì hai mục đó
+chính là câu trả lời của tính năng này. **File Excel/CSV KHÔNG cắt gì hết** — bản đầy đủ (có
+test: 300 object → file ra đủ 300 dòng).
+
+Chạy cùng mục 2 (+ mục 4)
 trong 1 lượt → **1 file duy nhất tối đa 3 sheet** `Security Rules` + `NAT Rules` +
 `Object Where Used`, tên file `rule[_nat][_object][_search]_<ts>.xlsx` nói đúng nó chứa gì.
 

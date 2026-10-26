@@ -329,6 +329,101 @@ class TestInRaManHinh(unittest.TestCase):
         self.assertIn("va 35 rule nua", blob)
 
 
+class TestKhongCatImLang(unittest.TestCase):
+    """IP nam trong RAT NHIEU object/group - phai hien DU, giong Global Find.
+
+    Day la ca hay gap nhat trong cau hinh that: 1 IP vua la host object rieng,
+    vua nam trong 2-3 subnet object, vua nam trong hang chuc group long nhau.
+    Cat bot ma khong noi ra thi nguoi doc tuong da thay het roi di ket luan -
+    sai kieu nguy hiem nhat cua mot tinh nang tra cuu.
+    """
+
+    @staticmethod
+    def _kho_lon(n_obj=60, n_grp=40):
+        """Kho co n_obj object cung mang 10.1.1.5 va n_grp group long nhau."""
+        objs = {f"H-{i:03d}": AddressObject(f"H-{i:03d}", "ip-netmask", "10.1.1.5/32")
+                for i in range(n_obj)}
+        grps = {"G-000": AddressGroup("G-000", "static",
+                                      members=sorted(objs)[:5])}
+        for i in range(1, n_grp):
+            grps[f"G-{i:03d}"] = AddressGroup(f"G-{i:03d}", "static",
+                                              members=[f"G-{i - 1:03d}"])
+        return objs, grps
+
+    def test_TIM_DU_khong_bo_sot_object_nao(self):
+        objs, grps = self._kho_lon()
+        rep = where_used_ip("10.1.1.5", objs, grps, [], GroupResolver(objs, grps, {}))
+        self.assertEqual(len(rep.objects), 60, "bo sot object mang IP nay")
+
+    def test_TIM_DU_group_long_nhau_trong_tran_do_sau(self):
+        from check_ip_pan.where_used import MAX_GROUP_DEPTH
+
+        objs, grps = self._kho_lon(n_grp=MAX_GROUP_DEPTH - 2)
+        rep = where_used_ip("10.1.1.5", objs, grps, [], GroupResolver(objs, grps, {}))
+        self.assertEqual(len([g for g in rep.groups if not g.note]),
+                         MAX_GROUP_DEPTH - 2, "bo sot group cha")
+
+    def test_cham_TRAN_do_sau_thi_PHAI_canh_bao(self):
+        """Khong canh bao thi ket qua thieu ma trong y het ket qua du."""
+        from check_ip_pan.where_used import MAX_GROUP_DEPTH
+
+        objs, grps = self._kho_lon(n_grp=MAX_GROUP_DEPTH + 5)
+        rep = where_used_ip("10.1.1.5", objs, grps, [], GroupResolver(objs, grps, {}))
+        self.assertTrue(any("cham tran" in (g.note or "") for g in rep.groups),
+                        "cat o tran 12 cap ma khong noi gi")
+
+    def test_IN_RA_man_hinh_noi_ro_con_bao_nhieu_chua_hien(self):
+        objs, grps = self._kho_lon(n_obj=300)
+        rep = where_used_ip("10.1.1.5", objs, grps, [], GroupResolver(objs, grps, {}))
+        blob = "\n".join(format_report(rep, max_items=200))
+        self.assertIn("Address Object (300)", blob, "phai in TONG SO that")
+        self.assertIn("va 100 object nua", blob, "cat bot ma khong noi ra")
+
+    def test_group_cat_bot_cung_phai_noi_ra(self):
+        objs, grps = self._kho_lon(n_obj=5, n_grp=11)
+        rep = where_used_ip("10.1.1.5", objs, grps, [], GroupResolver(objs, grps, {}))
+        blob = "\n".join(format_report(rep, max_items=4))
+        self.assertIn("Address Group (", blob)
+        self.assertIn("group nua", blob)
+
+    def test_NAT_cat_bot_cung_phai_noi_ra(self):
+        objs, grps = self._kho_lon(n_obj=1, n_grp=1)
+        nats = [NatRule(index=i, name=f"N{i}", source=["H-000"], destination=["any"])
+                for i in range(30)]
+        rep = where_used_ip("10.1.1.5", objs, grps, [], GroupResolver(objs, grps, {}),
+                            nat_rules=nats)
+        blob = "\n".join(format_report(rep, max_rules=10))
+        self.assertIn("va 20 NAT rule nua", blob)
+
+    def test_via_nhieu_ten_thi_noi_ro_con_bao_nhieu(self):
+        """O Source goi 10 group cung chua IP - khong duoc im lang chi in 3."""
+        objs = {"H-A": AddressObject("H-A", "ip-netmask", "10.1.1.5/32")}
+        grps = {f"G-{i}": AddressGroup(f"G-{i}", "static", members=["H-A"])
+                for i in range(10)}
+        r = rule(1, "R", sorted(grps), ["any"])
+        rep = where_used_ip("10.1.1.5", objs, grps, [r], GroupResolver(objs, grps, {}))
+        via = rep.rules_by_reference[0].via
+        self.assertIn("+", via, f"cat im lang danh sach 'qua': {via}")
+        self.assertIn("nua", via)
+
+    def test_FILE_XUAT_thi_KHONG_cat_gi_het(self):
+        """Man hinh cat cho gon duoc, file thi khong - do la ban day du."""
+        import tempfile
+
+        import openpyxl
+
+        from check_ip_pan.excel_export import export_where_used_to_excel
+
+        objs, grps = self._kho_lon(n_obj=300, n_grp=3)
+        rep = where_used_ip("10.1.1.5", objs, grps, [], GroupResolver(objs, grps, {}))
+        path = export_where_used_to_excel(tempfile.mkdtemp(), [rep])
+        ws = openpyxl.load_workbook(path).worksheets[0]
+        names = {ws.cell(row=r, column=3).value
+                 for r in range(2, ws.max_row + 1)
+                 if ws.cell(row=r, column=2).value == "OBJECT"}
+        self.assertEqual(len(names), 300, "file xuat bi cat bot object")
+
+
 class TestXuatFile(unittest.TestCase):
     def test_sheet_co_cot_VI_TRI_rieng_cua_Panorama(self):
         import tempfile
