@@ -774,8 +774,19 @@ class App(ttk.Frame):
             return
         names = ", ".join(os.path.basename(p) for p in output_paths)
         self.lbl_progress.config(text=f"Da xuat: {names}")
-        messagebox.showinfo("Hoan tat", "Da xuat ket qua:\n" + "\n".join(output_paths))
-        self._on_open_output()
+        for path in output_paths:
+            self._log(f"Export OK -> {path}")
+        # MO THU MUC OUTPUT DUNG MOT LAN.
+        #
+        # Thu muc output cua tab nay co dinh, nen lan xuat thu hai tro di viec
+        # bat them mot cua so file manager (va mot hop thoai) khong cho biet
+        # them dieu gi - chi la rac phai bam di. Tu lan 2 chi con dong trang
+        # thai + dong log, van du de biet file nao da ra.
+        if not getattr(self, "_output_opened", False):
+            self._output_opened = True
+            messagebox.showinfo("Hoan tat", "Da xuat ket qua:\n"
+                                + "\n".join(output_paths))
+            self._on_open_output()
 
     # -------------------------------------------------------------- misc
     def _on_browse_logfile(self):

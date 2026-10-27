@@ -525,21 +525,66 @@ def devicegroup_device_serials(config_root: ET.Element, dg_name: str) -> List[st
     return serials
 
 
+def _readonly_ids(config_root: ET.Element) -> set:
+    """id() cua moi phan tu nam trong <readonly>.
+
+    ElementTree khong co con tro len cha, nen muon biet mot <entry> co nam
+    trong nhanh readonly hay khong thi phai danh dau truoc tu goc.
+    """
+    out = set()
+    for ro in config_root.iter("readonly"):
+        for el in ro.iter():
+            out.add(id(el))
+    return out
+
+
+def _devicegroup_entries(config_root: ET.Element) -> Dict[str, ET.Element]:
+    """{ten DG: phan tu XML}, UU TIEN TUYET DOI nhanh NGOAI <readonly>.
+
+    BAY DA DAM PHAI (sua 10/2026): config Panorama co device-group o HAI noi
+      - /config/devices/entry/device-group/entry   -> co object + rulebase THAT
+      - /config/readonly/devices/.../device-group/entry -> ban sao chi-doc,
+        thuong CHI co <parent-dg>, KHONG co object nao
+    Ban cu lay `findall(".//device-group/entry")` roi `setdefault` - tuc la lay
+    cai nao GAP TRUOC. Tren thiet bi that <readonly> hay nam TRUOC <devices>,
+    nen tool vo duoc ban rong va bao "khong tim thay object" cho ca nhung
+    object dang nam so so trong DG do.
+    """
+    ro = _readonly_ids(config_root)
+    primary: Dict[str, ET.Element] = {}
+    fallback: Dict[str, ET.Element] = {}
+    for dg_parent in config_root.iter("device-group"):
+        for entry in dg_parent.findall("entry"):
+            name = entry.get("name")
+            if not name:
+                continue
+            (fallback if id(entry) in ro else primary).setdefault(name, entry)
+    for name, entry in fallback.items():
+        primary.setdefault(name, entry)
+    return primary
+
+
 def _dg_parents_from_config(config_root: ET.Element) -> Dict[str, Optional[str]]:
-    """Map {ten_dg: ten_dg_cha_or_None}. Doc <settings><parent-dg> cua moi DG."""
+    """{ten DG: ten DG cha}. Khong co cha -> con truc tiep cua Shared.
+
+    Quan he cha-con thuong CHI nam o ban <readonly>, nen phai quet CA HAI
+    nhanh. Va quan trong: mot entry KHONG co <parent-dg> thi KHONG duoc ghi de
+    len quan he da tim thay o nhanh kia - ban cu dung `parents[name] = parent`
+    (gan de) nen ban /devices (khong co parent-dg) xoa mat quan he vua doc tu
+    /readonly, va ca cay Device Group sup xuong con mot tang.
+    """
     parents: Dict[str, Optional[str]] = {}
-    for dg_el in config_root.findall('.//device-group/entry'):
-        name = dg_el.get('name')
-        if not name:
-            continue
-        parent = None
-        parent_el = dg_el.find('.//parent-dg')
-        if parent_el is not None and parent_el.text and parent_el.text.strip():
-            parent = parent_el.text.strip()
-        parents[name] = parent
-    if not parents:
-        for name in get_devicegroup_list(config_root):
+    for dg_parent in config_root.iter("device-group"):
+        for entry in dg_parent.findall("entry"):
+            name = entry.get("name")
+            if not name:
+                continue
             parents.setdefault(name, None)
+            parent_el = entry.find("parent-dg")
+            if parent_el is None:
+                parent_el = next(iter(entry.iter("parent-dg")), None)
+            if parent_el is not None and parent_el.text and parent_el.text.strip():
+                parents[name] = parent_el.text.strip()
     return parents
 
 
