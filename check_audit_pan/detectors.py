@@ -56,6 +56,9 @@ def find_overly_permissive_rules(rules: List[RuleSnapshot]) -> List[Finding]:
     vao detail), KHONG resolve object/group (D2)."""
     out: List[Finding] = []
     for r in rules:
+        # Rule HA TANG: rong o L3-L4 dung nhu thiet ke - xem is_infrastructure_rule().
+        if is_infrastructure_rule(r):
+            continue
         src_any = r.source == ["any"] or r.source == []
         dst_any = r.destination == ["any"] or r.destination == []
         port_any = r.service == ["any"] or r.service == []
@@ -297,6 +300,49 @@ def _apps_cover(r1: RuleSnapshot, r2: RuleSnapshot) -> bool:
     return a2 <= a1
 
 
+def _field_is_any(values: Optional[List[str]]) -> bool:
+    """O de TRONG hoac dung chu `any` - ca hai deu la "khong gioi han"."""
+    vals = {v.strip().lower() for v in (values or []) if v and v.strip()}
+    return (not vals) or vals == {"any"}
+
+
+def is_infrastructure_rule(rule: RuleSnapshot) -> bool:
+    """Rule HA TANG: MOI o L3-L4 deu `any`, va CHI khai bao Application.
+
+        src=any  dst=any  service=any  zone src/dst=any
+        application=[ping, traceroute, ...]
+
+    LUAT NGUOI VAN HANH DA CHOT (10/2026): rule dang nay la rule HA TANG - no
+    ton tai co chu dich de ping/traceroute/ldap... di duoc toan he thong.
+    Audit KHONG duoc dem no ra lam finding:
+
+      * bao no "Overly Permissive" la de nghi sai - no rong o L3-L4 dung nhu
+        thiet ke, con App-ID moi la cho that su gioi han;
+      * bao no UNUSED/UNREACHABLE roi khuyen xoa la dung thang vao rule ha tang;
+      * va no cung KHONG duoc che rule khac (viec do do `_apps_cover` chan).
+
+    Dinh nghia co y HEP: phai DU ca nam o `any` VA co gioi han Application.
+    Chi can mot o co gia tri that (vd service=tcp-443) thi khong con la rule
+    ha tang nua - luc do no la rule binh thuong va audit van soi nhu cu.
+    Khong phan biet action: mot rule `any/any/any app=[bittorrent] deny` cung
+    la rule ha tang (chan co chu dich), khong phai rac.
+    """
+    if _app_set(rule) is None:           # Application = any/rong -> rule L3-L4 thuong
+        return False
+    return (_field_is_any(rule.source) and _field_is_any(rule.destination)
+            and _field_is_any(rule.service) and _field_is_any(rule.from_zones)
+            and _field_is_any(rule.to_zones))
+
+
+def infrastructure_rules(rules: List[RuleSnapshot]) -> List[RuleSnapshot]:
+    """Danh sach rule ha tang - de GUI NOI RA da bo qua nhung rule nao.
+
+    Bo qua trong im lang la cach chac chan nhat de lan sau khong ai biet tool
+    da khong soi nhung rule do.
+    """
+    return [r for r in rules if is_infrastructure_rule(r)]
+
+
 def _covers_rule_fast(r1: RuleSnapshot, r2: RuleSnapshot, i1: int, i2: int,
                       from_any, to_any, from_zone_sets, to_zone_sets) -> bool:
     """Ban FAST cua _covers_rule() cho vong lap O(n^2): zone precomputed, thu tu
@@ -493,6 +539,12 @@ def find_shadow_rules(rules: List[RuleSnapshot], resolver, svc_resolver,
 
     out: List[Finding] = []
     for r in rules:
+        # Rule HA TANG khong bao gio la rac: no rong o L3-L4 dung nhu thiet ke,
+        # va phan that su gioi han nam o App-ID - thu tool nay khong do duoc.
+        # Bao no UNUSED/UNREACHABLE la dua thang de nghi xoa rule ha tang.
+        # Xem is_infrastructure_rule().
+        if is_infrastructure_rule(r):
+            continue
         reasons: List[str] = []
         detail_parts: List[str] = []
         _unreach_key = (r.name, r.vi_tri)

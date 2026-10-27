@@ -35,6 +35,7 @@ from .pan_api import (
 from .resolver import GroupResolver, ServiceResolver
 from .detectors import (
     find_shadow_rules, find_disabled_rules, find_overly_permissive_rules,
+    infrastructure_rules,
     find_overly_permissive_by_size, OVERLY_ADDR_THRESHOLD, OVERLY_PORT_THRESHOLD,
 )
 from .excel_io import export_findings, parse_import_file
@@ -463,6 +464,18 @@ class App(ttk.Frame):
                               "không có thiết bị và chưa nhập Target Firewall) → nhánh "
                               "UNUSED (Shadow) bị bỏ qua.")
                     self._log("CANH BAO: chưa chọn Target Firewall (Serial) → so sánh Zone trong 5-điều-kiện-superset sẽ fallback 'luôn coi tương thích' (0.6), có thể báo shadow sai ở trường hợp Zone khác nhau (IV.2.3/IV.7.5).")
+
+            # Rule HA TANG (moi o L3-L4 = any, chi khai Application) duoc BO QUA
+            # o ca 3 nhanh de nghi. Noi ra la bo qua nhung rule NAO - bo qua trong
+            # im lang la cach chac chan nhat de lan sau khong ai biet tool khong
+            # soi nhung rule do.
+            _ha_tang = infrastructure_rules(rules)
+            if _ha_tang:
+                _ten = ", ".join(r.name for r in _ha_tang[:10])
+                if len(_ha_tang) > 10:
+                    _ten += f" ... va {len(_ha_tang) - 10} nua"
+                self._log(f"Bo qua {len(_ha_tang)} RULE HA TANG (moi o L3-L4 = any, "
+                          f"chi khai Application) - khong dem ra lam finding: {_ten}")
 
             findings: List[Finding] = []
             if "disabled" in types:
