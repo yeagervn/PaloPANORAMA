@@ -213,8 +213,8 @@ if __name__ == "__main__":
 
 
 class TestGuiWiringStatic(unittest.TestCase):
-    """Kiem tra TINH (doc source, khong can tkinter): tab CHECK IP chi con DUNG 1
-    nut chay, khong con sot tham chieu toi cap nut/handler cu."""
+    """Kiem tra TINH (doc source, khong can tkinter): tab CHECK IP co DUNG 1
+    nut CHAY va 1 nut XUAT, khong con sot tham chieu toi cap nut/handler cu."""
 
     @classmethod
     def setUpClass(cls):
@@ -223,12 +223,27 @@ class TestGuiWiringStatic(unittest.TestCase):
         with open(path, encoding="utf-8") as f:
             cls.src = f.read()
 
-    def test_chi_con_1_nut_chay(self):
-        self.assertIn('text="Check / Export"', self.src)
+    def test_chi_con_1_nut_chay_va_1_nut_xuat(self):
+        """10/2026 - theo yeu cau: chay xong ket qua hien THANG tren bang, nen
+        Check tach khoi Export (truoc day 1 nut "Check / Export" lam ca hai, tuc
+        la lan nao chay cung ghi file du nguoi dung chi muon xem)."""
+        self.assertIn('text="Check"', self.src)
         self.assertIn("command=self._on_run_all", self.src)
+        self.assertIn('text="Export"', self.src)
+        self.assertIn("command=self._on_export", self.src)
+        self.assertNotIn('text="Check / Export"', self.src)
         # Nut "Check" rieng o muc 3 va nut "Export NAT" rieng da bi go bo
-        self.assertNotIn('text="Check", command=', self.src)
         self.assertNotIn('text="Export NAT", command=', self.src)
+
+    def test_bam_Check_KHONG_duoc_tu_ghi_file(self):
+        """Luong chay (`_run_all_worker`) khong duoc goi ham xuat file nao -
+        viec do la cua `_export_worker`."""
+        worker = self.src[self.src.index("def _run_all_worker"):
+                          self.src.index("def _finish_run_all")]
+        for ham in ("export_to_excel(", "export_nat_to_excel(", "export_nat_to_csv(",
+                    "export_combined_to_excel(", "export_where_used_to_excel(",
+                    "export_where_used_to_csv("):
+            self.assertNotIn(ham, worker, f"_run_all_worker con tu goi {ham}")
 
     def test_khong_con_tham_chieu_cu(self):
         for stale in ("btn_check_ip", "btn_search", "_on_check_ip", "_on_export_nat",

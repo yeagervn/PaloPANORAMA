@@ -376,11 +376,9 @@ def build_name_rule_cell(res: RowResult):
     matcher._scope_trustworthy()). Dong TOP1 "khong can lam gi" van xanh la - xem
     quyet dinh thiet ke o docstring _scope_trustworthy()."""
     cell, lines = _build_name_rule_cell_core(res)
-    cell, lines = _append_blast_radius(cell, lines, res)
     cell, lines = _append_blocking_deny(cell, lines, res)
     cell, lines = _append_broad_service(cell, lines, res)
     cell, lines = _append_zone_mismatch(cell, lines, res)
-    cell, lines = _append_zone_unknown(cell, lines, res)
     if not (getattr(res, 'untrusted_scope', False) and res.untrusted_scope_detail):
         return cell, lines
     extra = f"\n\u26A0 PHAM VI KHONG DO DUOC: {res.untrusted_scope_detail}"
@@ -391,22 +389,13 @@ def build_name_rule_cell(res: RowResult):
                                                           NAME_RULE_COL_CHARS)
 
 
-def _append_blast_radius(cell, lines, res: RowResult):
-    """S4: in HAU QUA cua chinh de xuat "+ ADD" ngay canh de xuat do.
-
-    Mot dong "+ ADD SOURCE" khong chi them 1 IP vao 1 rule: no cap cho IP do quyen
-    di tói TOAN BO Dest cua rule, tren TOAN BO port cua rule. Khong mau nao, canh
-    bao nao doi duoc hanh vi nguoi phe duyet bang viec cho ho thay con so do ngay
-    luc ky."""
-    if not getattr(res, 'blast_radius', None):
-        return cell, lines
-    extra = f"\n\u2192 PHAM VI ANH HUONG: {res.blast_radius}"
-    blocks = list(cell)
-    blocks.append(TextBlock(_f(ZONE_FONT, bold=False), extra))
-    old_text = "".join(getattr(b, 'text', '') or '' for b in cell)
-    return CellRichText(blocks), _estimate_wrapped_lines(old_text + extra,
-                                                          NAME_RULE_COL_CHARS)
-
+# BO 2 DONG NHAN XET (10/2026 - theo yeu cau nguoi van hanh):
+#
+#   "-> PHAM VI ANH HUONG: Source duoc them se co quyen di toi N dia chi x M port"
+#   "i  CHUA KIEM DUOC ZONE: khong doc duoc bang Interface/Zone tu cau hinh"
+#
+# O Name Rule chi con thu NGUOI DOC PHAI LAM (dong "+ ADD ...") va nhung canh
+# bao DOI HANH DONG do. Du lieu VAN nam tren RowResult, chi thoi khong in ra.
 
 def _append_blocking_deny(cell, lines, res: RowResult):
     """S5: rule deny/drop dung TRUOC diem chen se khop traffic nay.
@@ -466,7 +455,7 @@ def _append_zone_mismatch(cell, lines, res: RowResult):
     TOP4 - dung nhanh ma core KHONG in zone_warning - nen dong bi demote hien ten
     rule MA KHONG NEU LY DO. Admin khong the biet vi sao, va se di tao rule trung
     thay vi sua zone cua rule da co. Day la lan thu hai dung loi "ban va vo hinh",
-    nen lan nay in o lop ngoai nhu _append_zone_unknown.
+    nen lan nay in o lop ngoai, cung cho voi cac dong canh bao khac.
 
     Chan in trung: neu core DA in dong THIEU ZONE roi thi khong in lai."""
     if not res.zone_warning:
@@ -477,24 +466,6 @@ def _append_zone_mismatch(cell, lines, res: RowResult):
     extra = f"\n\u26A0 THIEU ZONE: {res.zone_warning}"
     blocks = list(cell)
     blocks.append(TextBlock(_f(ZONE_FONT, bold=True), extra))
-    return CellRichText(blocks), _estimate_wrapped_lines(old_text + extra,
-                                                          NAME_RULE_COL_CHARS)
-
-
-def _append_zone_unknown(cell, lines, res: RowResult):
-    """Trang thai ZONE_UNKNOWN truoc day IM LANG hoan toan (coi nhu zone da khop).
-
-    Nay phai noi ro: "chua kiem duoc zone" KHAC "zone da khop". Khong demote tier
-    (xem docstring matcher._zone_verdict) - chi de nguoi doc khong hieu nham rang
-    tool da kiem zone xong roi."""
-    if getattr(res, 'zone_verdict', None) != 'unknown':
-        return cell, lines
-    if not getattr(res, 'zone_unknown_detail', None):
-        return cell, lines
-    extra = f"\n\u2139 CHUA KIEM DUOC ZONE: {res.zone_unknown_detail}"
-    blocks = list(cell)
-    blocks.append(TextBlock(_f(GREY_FONT, italic=True), extra))
-    old_text = "".join(getattr(b, 'text', '') or '' for b in cell)
     return CellRichText(blocks), _estimate_wrapped_lines(old_text + extra,
                                                           NAME_RULE_COL_CHARS)
 

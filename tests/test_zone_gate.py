@@ -174,9 +174,14 @@ class TestExportPhaiNoiRa(unittest.TestCase):
         self.assertIn("ZONE", text.upper())
         self.assertIn("vpn", text.lower())
 
-    def test_unknown_in_ro_la_chua_kiem_duoc(self):
-        text = self._text(_classify(SRC_VPN, ["trust"], ["dmz"], zone_lookup=[]))
-        self.assertIn("CHUA KIEM DUOC ZONE", text.upper())
+    def test_unknown_KHONG_con_in_dong_nhan_xet_ra_bao_cao(self):
+        """10/2026 - theo yeu cau nguoi van hanh: o Name Rule chi giu thu PHAI
+        LAM. Trang thai VAN duoc giu tren RowResult - day moi la thu phai khoa,
+        chu khong phai dong chu."""
+        res = _classify(SRC_VPN, ["trust"], ["dmz"], zone_lookup=[])
+        self.assertEqual(res.zone_verdict, "unknown")
+        self.assertTrue(res.zone_unknown_detail, "van phai tinh ra ly do")
+        self.assertNotIn("CHUA KIEM DUOC ZONE", self._text(res).upper())
 
 
 if __name__ == "__main__":

@@ -100,7 +100,9 @@ class TestBlastRadius(unittest.TestCase):
         self.assertTrue(res.blast_radius, "dong '+ ADD SOURCE' phai noi ro hau qua")
         self.assertIn("14", res.blast_radius)
         self.assertIn("3 port", res.blast_radius)
-        self.assertIn("PHAM VI ANH HUONG", _cell(res))
+        # 10/2026: VAN tinh blast radius (cac lop khac con dung) nhung KHONG
+        # in ra bao cao nua - o Name Rule chi giu thu NGUOI DOC PHAI LAM.
+        self.assertNotIn("PHAM VI ANH HUONG", _cell(res))
 
     def test_add_dest_doi_xung(self):
         """Them DEST -> toan bo Source cua rule duoc mo tói dich moi."""

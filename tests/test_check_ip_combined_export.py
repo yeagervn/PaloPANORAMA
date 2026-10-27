@@ -188,7 +188,7 @@ class TestGuiRoutingStatic(unittest.TestCase):
 
     def test_co_nhanh_gop_file(self):
         self.assertIn("export_combined_to_excel", self.src)
-        self.assertIn('nat_is_csv = (plan["nat_format"] == "csv")', self.src)
+        self.assertIn('nat_is_csv = (plan.get("nat_format") == "csv")', self.src)
         self.assertIn("if rule_data and nat_data and not nat_is_csv:", self.src)
 
     def test_tach_pipeline_khoi_export(self):

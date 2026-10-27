@@ -102,14 +102,18 @@ def _expand_entry_runs(entry: str, resolver: GroupResolver, target_ips: Set[str]
         resolved = resolver.resolve(entry)  # da cache tu buoc build_index, O(1)
         all_members = sorted(resolved.member_details, key=lambda t: (t[0] or "", t[1]))
         if filter_to_matched:
-            # CHI hien thi member co value TRUNG voi 1 trong cac IP dang tim (thay
-            # vi in het toan bo group - group co the co hang chuc member gay roi).
-            # Neu KHONG co member nao lien quan (group nay khong phai ly do match,
-            # vd o phia con lai cua rule) -> hien TOAN BO member (giong cac cot
-            # khac luon co gia tri de xem), tranh truong hop chi hien ten tran
-            # khong co thong tin gi (nhin nhu bi loi/thieu nhat quan).
-            matched_members = [(n, v) for (n, v) in all_members if _member_matches_target(v, target_ips)]
-            members = matched_members if matched_members else all_members
+            # CHI hien member co value TRUNG voi 1 trong cac IP dang tim.
+            #
+            # THAY DOI (10/2026 - theo yeu cau): truoc day neu group KHONG co
+            # member nao lien quan (vd group o phia con lai cua rule) thi in
+            # TOAN BO member. Mot group co hang chuc member, nhan len hai phia
+            # cua hang chuc rule, la nguoi doc phai tu do mat tim xem IP minh
+            # nhap nam o dau. Nay khong lien quan thi CHI in TEN group - dung
+            # tinh than "output chi hien thong tin cua IP input".
+            members = [(n, v) for (n, v) in all_members
+                       if _member_matches_target(v, target_ips)]
+            if not members:
+                return [("name", entry)]
         else:
             # Dung cho Export bang NAT (muc 4 GUI): LUON hien THAT DAY DU moi
             # member (khong loc bo) - chi khac mau (xanh la neu trung IP nhap

@@ -7,7 +7,7 @@ import os
 import threading
 import queue
 import xml.etree.ElementTree as ET
-from typing import Dict, Optional, Set
+from typing import Any, Dict, Optional, Set
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
@@ -21,6 +21,7 @@ from .excel_export import (export_to_excel, export_nat_to_excel, export_nat_to_c
                             export_combined_to_excel, export_where_used_to_excel,
                             export_where_used_to_csv)
 from .where_used import format_report
+from . import rows as rowbuild
 
 class App(ttk.Frame):
     """Giao dien tool CHECK IP - dang 1 ttk.Frame de nhung duoc vao bat ky
@@ -43,6 +44,9 @@ class App(ttk.Frame):
         self._closing = False
         self._poll_after_id = None
         self.api_client: Optional[PanApiClient] = None
+        # Du lieu THO cua luot chay gan nhat - nut Export dung lai dung bo nay,
+        # khong chay lai pipeline.
+        self._last: Optional[Dict[str, Any]] = None
         self.config_root: Optional[ET.Element] = None
         self.registered_ip_tags: Dict[str, Set[str]] = {}
 
@@ -100,13 +104,12 @@ class App(ttk.Frame):
 
         frm_input = ttk.LabelFrame(
             self.root,
-            text="2. Danh sach IP can tim trong SECURITY RULE - tuy chon "
-                 "(moi IP 1 dong hoac paste tu Excel; de trong = BO QUA Check Rule)")
+            text="2. Danh sach IP can tim trong SECURITY RULE")
         frm_input.pack(fill="both", expand=False, **pad)
-        self.txt_ips = scrolledtext.ScrolledText(frm_input, height=7, font=("Consolas", 10))
+        self.txt_ips = scrolledtext.ScrolledText(frm_input, height=4, font=("Consolas", 10))
         self.txt_ips.pack(fill="both", expand=True, **pad)
 
-        frm_log = ttk.LabelFrame(self.root, text="3. File Log doi chieu - tuy chon (.xlsx/.csv: Source IP | Dest IP | Port)")
+        frm_log = ttk.LabelFrame(self.root, text="3. File Log doi chieu")
         frm_log.pack(fill="x", **pad)
         self.ent_logfile = ttk.Entry(frm_log)
         self.ent_logfile.grid(row=0, column=0, sticky="we", padx=6, pady=4)
@@ -120,13 +123,13 @@ class App(ttk.Frame):
 
         frm_nat = ttk.LabelFrame(
             self.root,
-            text="4. Export bang NAT - tuy chon (de trong = BO QUA NAT, chi Check Rule)")
+            text="4. Export bang NAT")
         frm_nat.pack(fill="x", **pad)
         ttk.Label(frm_nat, text="Export bang NAT:").grid(row=0, column=0, sticky="w", padx=6, pady=4)
         self.var_export_nat = tk.StringVar(value="No")
-        ttk.Radiobutton(frm_nat, text="Yes (Full - xuat toan bo bang NAT)", variable=self.var_export_nat,
+        ttk.Radiobutton(frm_nat, text="Yes (Full)", variable=self.var_export_nat,
                          value="Yes", command=self._on_toggle_nat).grid(row=0, column=1, sticky="w")
-        ttk.Radiobutton(frm_nat, text="No (Search - chi xuat rule khop IP nhap ben duoi)", variable=self.var_export_nat,
+        ttk.Radiobutton(frm_nat, text="No (Search)", variable=self.var_export_nat,
                          value="No", command=self._on_toggle_nat).grid(row=0, column=2, sticky="w", padx=(8, 0))
         ttk.Label(frm_nat, text="  Dinh dang file:").grid(row=0, column=3, sticky="e", padx=(16, 4))
         self.cmb_nat_format = ttk.Combobox(frm_nat, width=8, state="readonly",
@@ -146,8 +149,7 @@ class App(ttk.Frame):
         # tung viec la cach chac chan de 2 o lech nhau roi nguoi doc so sai.
         frm_obj = ttk.LabelFrame(
             self.root,
-            text="5. Check Object (Where Used) - tuy chon (IP lay tu MUC 2; "
-                 "o duoi chi de go THEM ten object/group)")
+            text="5. Check Object (Where Used)")
         frm_obj.pack(fill="x", **pad)
         self.var_where_used = tk.BooleanVar(value=False)
         ttk.Checkbutton(
@@ -161,8 +163,6 @@ class App(ttk.Frame):
         self.ent_where_objects = ttk.Entry(frm_obj)
         self.ent_where_objects.grid(row=1, column=1, sticky="we", padx=6, pady=4)
         frm_obj.columnconfigure(1, weight=1)
-        ttk.Label(frm_obj, text="(tuy chon, nhieu ten cach nhau bang dau phay)",
-                  foreground="#555555").grid(row=1, column=2, sticky="w", padx=6)
         self.ent_where_objects.bind("<KeyRelease>", lambda e: self._refresh_plan_hint())
 
         # 1 NUT DUY NHAT cho ca 2 viec (thay cho cap "Check" o muc 3 + "Export NAT"
@@ -170,11 +170,16 @@ class App(ttk.Frame):
         # Export NAT neu muc 4 duoc chon - nhap ca 2 thi chay ca 2 trong CUNG 1 luot.
         frm_actions = ttk.Frame(self.root)
         frm_actions.pack(fill="x", **pad)
-        self.btn_run = ttk.Button(frm_actions, text="Check / Export",
+        self.btn_run = ttk.Button(frm_actions, text="Check",
                                    command=self._on_run_all, state="disabled")
         self.btn_run.pack(side="left", padx=4)
         self.btn_cancel = ttk.Button(frm_actions, text="Cancel", command=self._on_cancel, state="disabled")
         self.btn_cancel.pack(side="left", padx=4)
+        # Export TACH khoi Check (10/2026 - theo yeu cau): chay xong ket qua
+        # hien THANG tren bang; chi ghi file khi nguoi dung thuc su muon.
+        self.btn_export = ttk.Button(frm_actions, text="Export",
+                                      command=self._on_export, state="disabled")
+        self.btn_export.pack(side="left", padx=4)
         self.btn_open_output = ttk.Button(frm_actions, text="Open Output Folder", command=self._on_open_output)
         self.btn_open_output.pack(side="left", padx=4)
 
@@ -195,9 +200,33 @@ class App(ttk.Frame):
         self.progress = ttk.Progressbar(frm_progress, mode="determinate", maximum=100)
         self.progress.pack(fill="x")
 
+        frm_res = ttk.LabelFrame(self.root, text="6. Ket qua")
+        frm_res.pack(fill="both", expand=True, **pad)
+        cols = tuple(f"c{i}" for i in range(1, rowbuild.NCOL + 1))
+        self.tree = ttk.Treeview(frm_res, columns=cols, show="headings", height=12)
+        for col, width in zip(cols, (210, 300, 300, 150, 110, 150, 120, 130, 110, 110)):
+            self.tree.heading(col, text="")
+            self.tree.column(col, width=width, minwidth=40, stretch=False, anchor="w")
+        self.tree.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=4)
+        vsb = ttk.Scrollbar(frm_res, orient="vertical", command=self.tree.yview)
+        vsb.grid(row=0, column=1, sticky="ns", pady=4)
+        hsb = ttk.Scrollbar(frm_res, orient="horizontal", command=self.tree.xview)
+        hsb.grid(row=1, column=0, sticky="ew", padx=(6, 0))
+        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        frm_res.columnconfigure(0, weight=1)
+        frm_res.rowconfigure(0, weight=1)
+        self.tree.tag_configure("section", background="#1F4E79", foreground="#FFFFFF")
+        self.tree.tag_configure("hdr", background="#DCE6F1", foreground="#1F4E79")
+        self.tree.tag_configure("note", foreground="#9C5700")
+        self.tree.tag_configure("off", foreground="#C00000")
+        self.tree.tag_configure("ok", background="#E2EFDA")
+        self.tree.tag_configure("no", background="#FCE4D6")
+        self.lbl_counts = ttk.Label(frm_res, text="Chua chay.")
+        self.lbl_counts.grid(row=2, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 4))
+
         frm_log = ttk.LabelFrame(self.root, text="Log")
-        frm_log.pack(fill="both", expand=True, **pad)
-        self.txt_log = scrolledtext.ScrolledText(frm_log, height=13, state="disabled", font=("Consolas", 9))
+        frm_log.pack(fill="both", expand=False, **pad)
+        self.txt_log = scrolledtext.ScrolledText(frm_log, height=8, state="disabled", font=("Consolas", 9))
         self.txt_log.pack(fill="both", expand=True, **pad)
 
     def _show_dg_chain(self):
@@ -227,13 +256,13 @@ class App(ttk.Frame):
         self.txt_nat_ips.config(state="normal")
         if is_full:
             self.lbl_nat_ips.config(
-                text="IP can highlight (tuy chon, mau XANH LA - de trong = xuat full khong highlight):")
+                text="IP can highlight:")
         else:
             # THAY DOI (10/2026): o nay khong con "BAT BUOC" theo kieu chan ca luot
             # chay nua - de trong chi co nghia la BO QUA phan NAT (van chay Check
             # Rule neu muc 2/3 co du lieu).
             self.lbl_nat_ips.config(
-                text="IP can tim trong bang NAT (moi IP 1 dong - de trong = BO QUA NAT, chi Check Rule):")
+                text="IP can tim trong bang NAT:")
         self._refresh_plan_hint()
 
     # ------------------------------------------------- lap ke hoach & validate
@@ -312,6 +341,8 @@ class App(ttk.Frame):
                     self._finish_connect(payload)
                 elif kind == "done_run_all":
                     self._finish_run_all(payload)
+                elif kind == "done_export":
+                    self._finish_export(payload)
                 elif kind == "enable_ui":
                     self._set_busy(False)
         except queue.Empty:
@@ -466,70 +497,14 @@ class App(ttk.Frame):
             else:
                 self._log("[Muc 5] Khong bat -> BO QUA Check Object.")
 
-            nat_is_csv = (plan["nat_format"] == "csv")
-            if rule_data and nat_data and not nat_is_csv:
-                self._set_status("Exporting Excel (Rule + NAT, 1 file 2 sheet)...")
-                output_paths.append(export_combined_to_excel(
-                    OUTPUT_DIR,
-                    rules=rule_data["rules"],
-                    match_results=rule_data["match_results"],
-                    resolver=rule_data["resolver"],
-                    service_objects=rule_data["service_objects"],
-                    service_groups=rule_data["service_groups"],
-                    nat_rules=nat_data["nat_rules"],
-                    nat_resolver=nat_data["resolver"],
-                    nat_service_objects=nat_data["service_objects"],
-                    nat_service_groups=nat_data["service_groups"],
-                    log_entries=rule_data["log_entries"],
-                    highlight_ips=nat_data["highlight_ips"],
-                    filter_ips=nat_data["filter_ips"],
-                    where_reports=where_reports,
-                    log_func=self._log,
-                ))
-                where_reports = None       # da nam trong file gop, khong xuat lai
-            else:
-                if rule_data and nat_data and nat_is_csv:
-                    self._log("[NAT] Dinh dang CSV khong gop duoc vao file Excel 2 sheet "
-                              "-> xuat rieng 2 file (chon 'xlsx' o muc 4 neu muon gop chung).")
-                if rule_data:
-                    self._set_status("Exporting Excel (Rule)...")
-                    if where_reports:
-                        # Rule + Check Object cung 1 luot -> 1 file 2 sheet,
-                        # dung co che gop san co (khong viet lai logic export).
-                        output_paths.append(export_combined_to_excel(
-                            OUTPUT_DIR,
-                            rules=rule_data["rules"],
-                            match_results=rule_data["match_results"],
-                            resolver=rule_data["resolver"],
-                            service_objects=rule_data["service_objects"],
-                            service_groups=rule_data["service_groups"],
-                            log_entries=rule_data["log_entries"],
-                            where_reports=where_reports,
-                            log_func=self._log))
-                        where_reports = None
-                    else:
-                        output_paths.append(export_to_excel(
-                            OUTPUT_DIR, rule_data["rules"], rule_data["match_results"],
-                            rule_data["resolver"], rule_data["service_objects"],
-                            rule_data["service_groups"],
-                            log_entries=rule_data["log_entries"], log_func=self._log))
-                if nat_data:
-                    self._set_status("Exporting bang NAT ({}, {})...".format(
-                        "Full" if plan["nat_mode_full"] else "Search", plan["nat_format"]))
-                    exporter = export_nat_to_csv if nat_is_csv else export_nat_to_excel
-                    output_paths.append(exporter(
-                        OUTPUT_DIR, nat_data["nat_rules"], nat_data["resolver"],
-                        nat_data["service_objects"], nat_data["service_groups"],
-                        highlight_ips=nat_data["highlight_ips"],
-                        filter_ips=nat_data["filter_ips"], log_func=self._log))
-                if where_reports:
-                    self._set_status("Exporting Check Object...")
-                    exporter = (export_where_used_to_csv if nat_is_csv and nat_data
-                                else export_where_used_to_excel)
-                    output_paths.append(exporter(OUTPUT_DIR, where_reports,
-                                                  log_func=self._log))
-
-            self.msg_queue.put(("done_run_all", output_paths))
+            # KHONG xuat file o day nua (10/2026 - theo yeu cau): chay xong
+            # thi KET QUA HIEN THANG tren bang o muc 6. File chi duoc ghi khi
+            # nguoi dung bam nut Export - luc do dung lai dung bo du lieu tho
+            # nay, khong chay lai pipeline.
+            self.msg_queue.put(("done_run_all", {
+                "plan": plan, "rule": rule_data, "nat": nat_data,
+                "where": where_reports,
+            }))
         except PanApiError as e:
             self._log(f"FAILED: {e.user_message}")
             self.logger.exception("Run all error")
@@ -646,16 +621,161 @@ class App(ttk.Frame):
             "filter_ips": set(nat_filter_ips),
         }
 
-    def _finish_run_all(self, output_paths):
-        if isinstance(output_paths, str):  # tuong thich nguoc, phong khi con noi goi kieu cu
-            output_paths = [output_paths]
+    def _finish_run_all(self, payload):
+        """Ve ket qua len bang o muc 6. KHONG xuat file."""
+        if payload is None:
+            return
+        if isinstance(payload, (str, list)):        # tuong thich nguoc
+            self._finish_export(payload if isinstance(payload, list) else [payload])
+            return
+        self._last = payload
+        rule_data = payload.get("rule")
+        nat_data = payload.get("nat")
+        where_reports = payload.get("where")
+        plan = payload.get("plan") or {}
+
+        display = []
+        if rule_data:
+            display.extend(rowbuild.section("rule"))
+            display.extend(rowbuild.rule_rows(
+                rule_data["rules"], rule_data["match_results"], rule_data["resolver"],
+                rule_data["service_objects"], rule_data["service_groups"],
+                target_ips=set(plan.get("valid_ips") or [])))
+            if rule_data.get("log_entries"):
+                display.extend(rowbuild.section("log"))
+                display.extend(rowbuild.log_rows(
+                    rule_data["log_entries"], rule_data["rules"], rule_data["resolver"],
+                    rule_data["service_objects"], rule_data["service_groups"]))
+        if nat_data:
+            display.extend(rowbuild.section("nat"))
+            display.extend(rowbuild.nat_rows(
+                nat_data["nat_rules"], nat_data["resolver"],
+                nat_data["service_objects"], nat_data["service_groups"],
+                target_ips=set(nat_data.get("filter_ips") or
+                               nat_data.get("highlight_ips") or []),
+                search_mode=bool(nat_data.get("filter_ips"))))
+        if where_reports:
+            display.extend(rowbuild.section("where"))
+            display.extend(rowbuild.where_rows(where_reports))
+
+        self._render_rows(display)
+        self.btn_export.config(state="normal" if display else "disabled")
+
+    def _render_rows(self, display):
+        self.tree.delete(*self.tree.get_children())
+        for col in self.tree["columns"]:
+            self.tree.heading(col, text="")
+        data = 0
+        for idx, row in enumerate(display):
+            kind = row["kind"]
+            if kind == "section":
+                tag = ("section",)
+            elif kind == "hdr":
+                tag = ("hdr",)
+            elif kind == "note":
+                tag = ("note",)
+            elif kind == "log":
+                tag = ("ok",) if row.get("ok") else ("no",)
+                data += 1
+            else:
+                tag = ("off",) if row.get("disabled") else ()
+                data += 1
+            self.tree.insert("", "end", iid=str(idx), values=row["cells"], tags=tag)
+        self.lbl_counts.config(
+            text=f"{data} dong ket qua ({len(display)} dong ke ca tieu de muc).")
+        self.lbl_progress.config(text=f"Xong: {data} dong ket qua.")
+
+    def _on_export(self):
+        """Ghi ra file tu dung bo du lieu tho cua luot chay vua roi."""
+        if not getattr(self, "_last", None):
+            messagebox.showinfo("Chua co gi de xuat", "Bam Check truoc da.")
+            return
+        payload = dict(self._last)
+        self._set_busy(True)
+        threading.Thread(target=self._export_worker, args=(payload,),
+                          daemon=True).start()
+
+    def _export_worker(self, payload):
+        output_paths = []
+        try:
+            plan = payload.get("plan") or {}
+            rule_data = payload.get("rule")
+            nat_data = payload.get("nat")
+            where_reports = payload.get("where")
+            nat_is_csv = (plan.get("nat_format") == "csv")
+
+            if rule_data and nat_data and not nat_is_csv:
+                self._set_status("Exporting Excel (Rule + NAT)...")
+                output_paths.append(export_combined_to_excel(
+                    OUTPUT_DIR,
+                    rules=rule_data["rules"],
+                    match_results=rule_data["match_results"],
+                    resolver=rule_data["resolver"],
+                    service_objects=rule_data["service_objects"],
+                    service_groups=rule_data["service_groups"],
+                    nat_rules=nat_data["nat_rules"],
+                    nat_resolver=nat_data["resolver"],
+                    nat_service_objects=nat_data["service_objects"],
+                    nat_service_groups=nat_data["service_groups"],
+                    log_entries=rule_data["log_entries"],
+                    highlight_ips=nat_data["highlight_ips"],
+                    filter_ips=nat_data["filter_ips"],
+                    where_reports=where_reports,
+                    log_func=self._log))
+                where_reports = None
+            else:
+                if rule_data and nat_data and nat_is_csv:
+                    self._log("[NAT] Dinh dang CSV khong gop duoc vao file Excel "
+                              "-> xuat rieng 2 file.")
+                if rule_data:
+                    self._set_status("Exporting Excel (Rule)...")
+                    if where_reports:
+                        output_paths.append(export_combined_to_excel(
+                            OUTPUT_DIR,
+                            rules=rule_data["rules"],
+                            match_results=rule_data["match_results"],
+                            resolver=rule_data["resolver"],
+                            service_objects=rule_data["service_objects"],
+                            service_groups=rule_data["service_groups"],
+                            log_entries=rule_data["log_entries"],
+                            where_reports=where_reports,
+                            log_func=self._log))
+                        where_reports = None
+                    else:
+                        output_paths.append(export_to_excel(
+                            OUTPUT_DIR, rule_data["rules"], rule_data["match_results"],
+                            rule_data["resolver"], rule_data["service_objects"],
+                            rule_data["service_groups"],
+                            log_entries=rule_data["log_entries"], log_func=self._log))
+                if nat_data:
+                    self._set_status("Exporting bang NAT...")
+                    exporter = export_nat_to_csv if nat_is_csv else export_nat_to_excel
+                    output_paths.append(exporter(
+                        OUTPUT_DIR, nat_data["nat_rules"], nat_data["resolver"],
+                        nat_data["service_objects"], nat_data["service_groups"],
+                        highlight_ips=nat_data["highlight_ips"],
+                        filter_ips=nat_data["filter_ips"], log_func=self._log))
+                if where_reports:
+                    self._set_status("Exporting Check Object...")
+                    exporter = (export_where_used_to_csv if nat_is_csv and nat_data
+                                else export_where_used_to_excel)
+                    output_paths.append(exporter(OUTPUT_DIR, where_reports,
+                                                  log_func=self._log))
+            self.msg_queue.put(("done_export", output_paths))
+        except Exception:
+            self.logger.exception("Export error")
+            self.msg_queue.put(("error", "Loi khi xuat file. Xem log.txt."))
+        finally:
+            self.msg_queue.put(("enable_ui", None))
+
+    def _finish_export(self, output_paths):
         if not output_paths:
             self.lbl_progress.config(text="Khong co file nao duoc xuat.")
             return
         names = ", ".join(os.path.basename(p) for p in output_paths)
-        self.lbl_progress.config(text=f"Hoan tat: {names}")
+        self.lbl_progress.config(text=f"Da xuat: {names}")
         messagebox.showinfo("Hoan tat", "Da xuat ket qua:\n" + "\n".join(output_paths))
-        self._on_open_output()  # tu dong mo output folder, khong can bam tay
+        self._on_open_output()
 
     # -------------------------------------------------------------- misc
     def _on_browse_logfile(self):
@@ -687,6 +807,9 @@ class App(ttk.Frame):
         self.btn_connect.config(state=state)
         self.btn_run.config(state="disabled" if busy else ("normal" if self.config_root is not None else "disabled"))
         self.btn_cancel.config(state="normal" if busy else "disabled")
+        # Export chi bat khi DA co ket qua tren bang.
+        self.btn_export.config(
+            state="disabled" if busy or not getattr(self, "_last", None) else "normal")
         if busy:
             self.cmb_nat_format.config(state="disabled")
             self.txt_nat_ips.config(state="disabled")

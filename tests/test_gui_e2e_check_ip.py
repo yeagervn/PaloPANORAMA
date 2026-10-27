@@ -208,12 +208,25 @@ class TestCheckIpGuiEndToEnd(unittest.TestCase):
 
             app._on_run_all()
             self.assertEqual(str(app.btn_run.cget("state")), "disabled",
-                             "dang chay ma nut Check/Export van bam duoc")
+                             "dang chay ma nut Check van bam duoc")
             self._pump(root, lambda: str(app.btn_run.cget("state")) == "normal",
                        label="chay xong va mo khoa lai UI")
 
+            # 1) Bam Check: ket qua hien THANG tren bang, KHONG ghi file nao.
+            self.assertTrue(app.tree.get_children(),
+                            "chay xong ma bang ket qua van rong")
+            self.assertEqual(sorted(set(os.listdir(self.out_dir)) - before), [],
+                             "bam Check ma da tu ghi file - phai cho toi Export")
+            self.assertEqual(str(app.btn_export.cget("state")), "normal",
+                             "co ket qua roi ma nut Export van mo")
+
+            # 2) Bam Export moi ghi file.
+            app._on_export()
+            self._pump(root, lambda: str(app.btn_run.cget("state")) == "normal",
+                       label="xuat xong va mo khoa lai UI")
+
         new_files = sorted(set(os.listdir(self.out_dir)) - before)
-        self.assertTrue(new_files, "chay xong nhung khong sinh file ket qua nao")
+        self.assertTrue(new_files, "bam Export ma khong sinh file nao")
         xlsx = [f for f in new_files if f.endswith(".xlsx")]
         self.assertTrue(xlsx, f"khong co file .xlsx nao trong {new_files}")
 
@@ -226,7 +239,7 @@ class TestCheckIpGuiEndToEnd(unittest.TestCase):
         self.assertGreater(wb["NAT Rules"].max_row, 1, "sheet NAT Rules rong")
         wb.close()
         self.assertTrue(any(n == "showinfo" for n, _ in dialogs.calls),
-                        "chay xong khong bao cho nguoi dung biet file o dau")
+                        "xuat xong khong bao cho nguoi dung biet file o dau")
 
     def test_check_object_in_ra_man_hinh_va_them_sheet(self):
         """Muc 5 - Check Object. Hai thu phai co, va day la 2 thu khac nhau:
@@ -259,6 +272,18 @@ class TestCheckIpGuiEndToEnd(unittest.TestCase):
                        label="chay xong va mo khoa lai UI")
 
             shown = app.txt_log.get("1.0", "end")
+            # Ket qua Check Object phai nam TREN BANG, khong chi trong o Log.
+            bang = "\n".join(
+                " | ".join(str(v) for v in app.tree.item(i, "values"))
+                for i in app.tree.get_children())
+            self.assertIn("CHECK OBJECT", bang,
+                          "bang ket qua khong co muc Check Object")
+            self.assertEqual(sorted(set(os.listdir(self.out_dir)) - before), [],
+                             "bam Check ma da tu ghi file")
+
+            app._on_export()
+            self._pump(root, lambda: str(app.btn_run.cget("state")) == "normal",
+                       label="xuat xong")
 
         self.assertIn("KET QUA CHECK OBJECT", shown,
                       "khong in ket qua Check Object ra man hinh")
