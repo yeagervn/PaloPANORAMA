@@ -10,7 +10,7 @@ import xml.etree.ElementTree as ET
 from typing import Any, Dict, Optional, Set
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, scrolledtext
+from tkinter import ttk, filedialog, font as tkfont, messagebox, scrolledtext
 
 from .core import APP_TITLE, OUTPUT_DIR, LOG_PATH, DEFAULT_WORKERS, setup_logger, PanApiError
 from .core import parse_ip_list_input, build_run_plan, describe_run_plan
@@ -202,25 +202,36 @@ class App(ttk.Frame):
 
         frm_res = ttk.LabelFrame(self.root, text="6. Ket qua")
         frm_res.pack(fill="both", expand=True, **pad)
-        cols = tuple(f"c{i}" for i in range(1, rowbuild.NCOL + 1))
-        self.tree = ttk.Treeview(frm_res, columns=cols, show="headings", height=12)
-        for col, width in zip(cols, (210, 300, 300, 150, 110, 150, 120, 130, 110, 110)):
-            self.tree.heading(col, text="")
-            self.tree.column(col, width=width, minwidth=40, stretch=False, anchor="w")
-        self.tree.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=4)
-        vsb = ttk.Scrollbar(frm_res, orient="vertical", command=self.tree.yview)
+        # Bang ket qua la mot widget Text, KHONG phai Treeview: Treeview chi to
+        # mau duoc ca mot dong, ma thong tin lai nam o tung DOAN chu trong o -
+        # xanh la = IP dang tra, do = phan con lai cua group. Xem rows.layout().
+        fixed = tkfont.nametofont("TkFixedFont")
+        fixed_bold = fixed.copy()
+        fixed_bold.configure(weight="bold")
+        self.txt_res = tk.Text(frm_res, height=14, wrap="none", font=fixed,
+                               state="disabled", background="#FFFFFF")
+        self.txt_res.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=4)
+        vsb = ttk.Scrollbar(frm_res, orient="vertical", command=self.txt_res.yview)
         vsb.grid(row=0, column=1, sticky="ns", pady=4)
-        hsb = ttk.Scrollbar(frm_res, orient="horizontal", command=self.tree.xview)
+        hsb = ttk.Scrollbar(frm_res, orient="horizontal", command=self.txt_res.xview)
         hsb.grid(row=1, column=0, sticky="ew", padx=(6, 0))
-        self.tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        self.txt_res.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
         frm_res.columnconfigure(0, weight=1)
         frm_res.rowconfigure(0, weight=1)
-        self.tree.tag_configure("section", background="#1F4E79", foreground="#FFFFFF")
-        self.tree.tag_configure("hdr", background="#DCE6F1", foreground="#1F4E79")
-        self.tree.tag_configure("note", foreground="#9C5700")
-        self.tree.tag_configure("off", foreground="#C00000")
-        self.tree.tag_configure("ok", background="#E2EFDA")
-        self.tree.tag_configure("no", background="#FCE4D6")
+        self.txt_res.tag_configure("section", background="#1F4E79", foreground="#FFFFFF")
+        self.txt_res.tag_configure("hdr", background="#DCE6F1", foreground="#1F4E79")
+        self.txt_res.tag_configure("note", foreground="#9C5700")
+        self.txt_res.tag_configure("off", foreground="#C00000")
+        self.txt_res.tag_configure("ok", background="#E2EFDA")
+        self.txt_res.tag_configure("no", background="#FCE4D6")
+        # Tag cua tung doan chu - phai nam TREN tag ca dong, neu khong mau do
+        # cua dong "[DISABLED]" se de len mau xanh la cua IP dang tra.
+        self.txt_res.tag_configure("name", font=fixed_bold)
+        self.txt_res.tag_configure("value", foreground="#C00000")
+        self.txt_res.tag_configure("value_matched", foreground="#107C10",
+                                   font=fixed_bold)
+        for _t in ("name", "value", "value_matched"):
+            self.txt_res.tag_raise(_t)
         self.lbl_counts = ttk.Label(frm_res, text="Chua chay.")
         self.lbl_counts.grid(row=2, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 4))
 
@@ -662,25 +673,20 @@ class App(ttk.Frame):
         self.btn_export.config(state="normal" if display else "disabled")
 
     def _render_rows(self, display):
-        self.tree.delete(*self.tree.get_children())
-        for col in self.tree["columns"]:
-            self.tree.heading(col, text="")
-        data = 0
-        for idx, row in enumerate(display):
-            kind = row["kind"]
-            if kind == "section":
-                tag = ("section",)
-            elif kind == "hdr":
-                tag = ("hdr",)
-            elif kind == "note":
-                tag = ("note",)
-            elif kind == "log":
-                tag = ("ok",) if row.get("ok") else ("no",)
-                data += 1
-            else:
-                tag = ("off",) if row.get("disabled") else ()
-                data += 1
-            self.tree.insert("", "end", iid=str(idx), values=row["cells"], tags=tag)
+        """Do danh sach dong ket qua vao bang. Luat trinh bay (ngat dong trong
+        cot, tag ca dong, tag tung doan chu) nam ca trong rows.py - o day chi
+        con `insert`."""
+        self._display_rows = list(display)
+        self.txt_res.config(state="normal")
+        self.txt_res.delete("1.0", "end")
+        for line in rowbuild.layout(display):
+            row_tag = line["tag"]
+            for kind, text in line["segments"]:
+                tags = tuple(t for t in (row_tag, "" if kind == "text" else kind) if t)
+                self.txt_res.insert("end", text, tags)
+            self.txt_res.insert("end", "\n")
+        self.txt_res.config(state="disabled")
+        data = sum(1 for row in display if rowbuild.is_data_row(row))
         self.lbl_counts.config(
             text=f"{data} dong ket qua ({len(display)} dong ke ca tieu de muc).")
         self.lbl_progress.config(text=f"Xong: {data} dong ket qua.")

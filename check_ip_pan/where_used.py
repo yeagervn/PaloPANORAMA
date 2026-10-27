@@ -78,10 +78,15 @@ UNUSED_TAIL = (
     "RAC, xoa duoc.")
 # HAI cho tool THAT SU chua thay, rieng cua ban Panorama. Khac han may policy
 # type khong bat: day la han che co that cua cach tool nap du lieu.
+# SUA 10/2026: ban truoc con them menh de "hoac o rule CUC BO tren chinh
+# firewall (ngoai tam quan ly Panorama)". Nguoi van hanh bac bo: o he thong
+# nay Panorama la tap CHA - cai gi firewall co thi Panorama deu co, va con
+# nhieu hon. Menh de do vua sai vua lam hong ket luan: no bien mot cau tra
+# loi do duoc thanh mot cau ra dieu kien khong ai kiem chung duoc.
+# Chi giu lai DUNG phan tool that su chua do: rule cua Device Group khac.
 UNUSED_WARN_DG = (
-    "Luu y: tool chi nap Shared + chuoi Device Group DANG CHON - object nay co "
-    "the dang duoc dung o Device Group KHAC, hoac o rule CUC BO tren chinh "
-    "firewall (ngoai tam quan ly Panorama).")
+    "Luu y: tool quet RULE trong pham vi Shared + chuoi Device Group DANG "
+    "CHON - rule o Device Group KHAC chua duoc quet.")
 UNUSED_WARN_SHARED = (
     "CAN THAN: object nay nam o tang Shared / DG cha - MOI Device Group con "
     "deu nhin thay no. Tool moi kiem duoc chuoi DG dang chon, phai kiem not cac "
@@ -452,6 +457,63 @@ def _scan_nat(nat_rules: Sequence[NatRule], interest: Set[str],
 # ============================================================================
 # HAI DUONG VAO
 # ============================================================================
+def find_outside_chain(query: str, layers, chain_names: Sequence[str],
+                       by_name: bool = False) -> List[Tuple[str, str, str]]:
+    """(tang, ten object, gia tri) o cac tang NGOAI chuoi Device Group dang chon.
+
+    VI SAO CO HAM NAY
+    =================
+    Nguoi van hanh go mot IP/ten CO THAT tren thiet bi ma tool bao "khong tim
+    thay" - va cau tra loi cu la mot cau ra dieu kien: "co the no nam o Device
+    Group khac". Object tren Panorama la tap CHA nen cau tra loi dung phai la
+    mot cau KHANG DINH: no nam o DG nao. Ca config da nam san trong bo nho,
+    quet het moi DG khong ton them mot lenh API nao.
+
+    `layers` la ket qua `pan_api.collect_all_object_layers()`.
+    """
+    chain = {str(c).lower() for c in (chain_names or [])}
+    try:
+        ip_int: Optional[int] = None if by_name else int(ipaddress.ip_address(query))
+    except ValueError:
+        return []
+    out: List[Tuple[str, str, str]] = []
+    for layer, objs, groups in layers or []:
+        if str(layer).lower() in chain:
+            continue
+        if by_name:
+            if query in objs:
+                out.append((layer, query, objs[query].raw_value))
+            elif query in groups:
+                out.append((layer, query, f"address-group ({groups[query].kind})"))
+            continue
+        for name, obj in objs.items():
+            if obj.kind == "fqdn":
+                continue
+            rng = _object_ranges(obj)
+            if rng and rng[0] <= ip_int <= rng[1]:
+                out.append((layer, name, obj.raw_value))
+    out.sort()
+    return out
+
+
+def note_outside_chain(report: UsageReport, hits: Sequence[Tuple[str, str, str]],
+                       dg_name: str, found_in_chain: bool) -> None:
+    """Noi THANG object nam o Device Group nao, thay vi mot cau ra dieu kien."""
+    if not hits:
+        return
+    where = ", ".join(f"{layer}: {name} ({value})" for layer, name, value in hits[:8])
+    if len(hits) > 8:
+        where += f" ... va {len(hits) - 8} nua"
+    if found_in_chain:
+        report.notes.append(
+            f"Ngoai chuoi Device Group '{dg_name}', gia tri/ten nay CON duoc "
+            f"dinh nghia o: {where}. Sua o tang nay KHONG anh huong cac DG do.")
+    else:
+        report.notes.append(
+            f"KHONG co trong Shared + chuoi Device Group '{dg_name}', nhung CO "
+            f"o: {where}. Doi Device Group o muc 1 roi tra lai.")
+
+
 def where_used_ip(ip: str,
                   address_objects: Dict[str, AddressObject],
                   address_groups: Dict[str, AddressGroup],

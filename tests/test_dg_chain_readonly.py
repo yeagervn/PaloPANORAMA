@@ -139,5 +139,72 @@ class TestObjectKhongDuocMAT(unittest.TestCase):
         self.assertIn("H-DG-ALL", [o.name for o in rep.objects])
 
 
+class TestObjectNamNGOAIChuoiDG(unittest.TestCase):
+    """Cau tra loi phai la cau KHANG DINH, khong phai cau ra dieu kien.
+
+    Object tren Panorama la tap CHA: cai gi firewall co thi Panorama deu co.
+    Nen khi nguoi dung go mot IP/ten CO THAT ma chuoi DG dang chon khong co,
+    tool phai noi THANG no nam o Device Group nao - thay vi "co the no nam o
+    DG khac" (cau cu, khong ai kiem chung duoc).
+    """
+
+    def _layers(self):
+        from check_ip_pan.pan_api import collect_all_object_layers
+
+        return collect_all_object_layers(ET.fromstring(XML_READONLY_TRUOC))
+
+    def test_quet_het_MOI_device_group_chu_khong_chi_chuoi(self):
+        self.assertEqual([ten for ten, _o, _g in self._layers()],
+                         ["shared", "DG-ALL", "DG-DC", "DG-HN"])
+
+    def test_chi_ro_DG_nao_dang_giu_IP_do(self):
+        from check_ip_pan.where_used import find_outside_chain
+
+        hits = find_outside_chain("10.3.3.3", self._layers(),
+                                  ["shared", "DG-ALL", "DG-DC"])
+        self.assertEqual([(l, n) for l, n, _v in hits], [("DG-HN", "H-DG-HN")])
+
+    def test_KHONG_bao_lai_nhung_tang_DANG_trong_chuoi(self):
+        """Tang trong chuoi da duoc bao o phan chinh - nhac lai la nhieu."""
+        from check_ip_pan.where_used import find_outside_chain
+
+        self.assertEqual(find_outside_chain("10.1.1.5", self._layers(),
+                                            ["shared", "DG-ALL", "DG-DC"]), [])
+
+    def test_tra_theo_TEN_cung_chi_ro_DG(self):
+        from check_ip_pan.where_used import find_outside_chain
+
+        hits = find_outside_chain("G-HN", self._layers(), ["shared"], by_name=True)
+        self.assertEqual([(l, n) for l, n, _v in hits], [("DG-HN", "G-HN")])
+
+    def test_ghi_chu_noi_RO_doi_Device_Group_di_tra_lai(self):
+        from check_ip_pan.where_used import (UsageReport, find_outside_chain,
+                                             note_outside_chain)
+
+        rep = UsageReport(query="10.3.3.3")
+        hits = find_outside_chain("10.3.3.3", self._layers(),
+                                  ["shared", "DG-ALL", "DG-DC"])
+        note_outside_chain(rep, hits, "DG-DC", found_in_chain=False)
+        ghi_chu = " ".join(rep.notes)
+        self.assertIn("DG-HN", ghi_chu)
+        self.assertIn("H-DG-HN", ghi_chu)
+        self.assertIn("Doi Device Group", ghi_chu)
+
+    def test_tim_thay_trong_chuoi_ma_DG_khac_cung_co_thi_van_noi(self):
+        from check_ip_pan.where_used import UsageReport, note_outside_chain
+
+        rep = UsageReport(query="10.3.3.3")
+        note_outside_chain(rep, [("DG-HN", "H-DG-HN", "10.3.3.3/32")],
+                           "DG-DC", found_in_chain=True)
+        self.assertIn("KHONG anh huong", " ".join(rep.notes))
+
+    def test_khong_co_gi_ngoai_chuoi_thi_IM_LANG(self):
+        from check_ip_pan.where_used import UsageReport, note_outside_chain
+
+        rep = UsageReport(query="10.0.0.1")
+        note_outside_chain(rep, [], "DG-HN", found_in_chain=True)
+        self.assertEqual(rep.notes, [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

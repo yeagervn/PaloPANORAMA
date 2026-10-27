@@ -300,11 +300,26 @@ def run_where_used_pipeline(config_root: ET.Element, dg_name: str,
     Tai su dung toi da nhung gi luot chay nay da lam: `resolver` (va cache
     resolve nang nhat ve CPU trong do), `rules`, `nat_rules`.
     """
-    from .where_used import build_parent_index, where_used_ip, where_used_object
+    from .pan_api import collect_all_object_layers
+    from .where_used import (build_parent_index, find_outside_chain,
+                             note_outside_chain, where_used_ip,
+                             where_used_object)
 
     address_objects, address_groups, _so, _sg = parse_dg_objects(
         config_root, dg_name, log_func)
     layer_of = build_layer_index(config_root, dg_name)
+    chain_names, _chain_els = resolve_devicegroup_chain(config_root, dg_name)
+    all_layers = collect_all_object_layers(config_root)
+
+    # Dem object THEO TUNG TANG. Khi nguoi dung bao "object co that ma tool
+    # khong thay", dong log nay tra loi ngay: tang nao rong thi loi nam o cho
+    # nap tang do, khong phai doan.
+    dem = {ten: len(objs) + len(groups) for ten, objs, groups in all_layers}
+    log_func("[Check Object] Object theo tang: "
+             + ", ".join(f"{ten}={dem.get(ten, 0)}" for ten in chain_names)
+             + f" | ngoai chuoi: "
+             + ", ".join(f"{ten}={n}" for ten, n in sorted(dem.items())
+                         if ten not in set(chain_names)))
 
     if resolver is None:
         resolver = GroupResolver(address_objects, address_groups, registered_ip_tags, log_func)
@@ -323,17 +338,24 @@ def run_where_used_pipeline(config_root: ET.Element, dg_name: str,
     for ip in ips:
         if cancel_event is not None and cancel_event.is_set():
             return reports
-        reports.append(where_used_ip(
+        rep = where_used_ip(
             ip, address_objects, address_groups, rules, resolver,
             nat_rules=nat_rules, parents=parents, layer_of=layer_of,
-            range_cache=range_cache))
+            range_cache=range_cache)
+        note_outside_chain(rep, find_outside_chain(ip, all_layers, chain_names),
+                           dg_name, bool(rep.objects or rep.groups))
+        reports.append(rep)
     for name in names:
         if cancel_event is not None and cancel_event.is_set():
             return reports
-        reports.append(where_used_object(
+        rep = where_used_object(
             name, address_objects, address_groups, rules, resolver,
             nat_rules=nat_rules, parents=parents, layer_of=layer_of,
-            range_cache=range_cache))
+            range_cache=range_cache)
+        note_outside_chain(
+            rep, find_outside_chain(name, all_layers, chain_names, by_name=True),
+            dg_name, name in address_objects or name in address_groups)
+        reports.append(rep)
     log_func(f"[Check Object] Tra xong {len(reports)} muc")
     return reports
 

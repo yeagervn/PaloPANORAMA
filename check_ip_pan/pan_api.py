@@ -267,6 +267,31 @@ def resolve_devicegroup_chain(config_root: ET.Element, dg_name: str
     return chain_names, chain_els
 
 
+def collect_all_object_layers(config_root: ET.Element
+                              ) -> "List[Tuple[str, Dict, Dict]]":
+    """(ten tang, address_objects, address_groups) cho SHARED + MOI Device Group.
+
+    VI SAO CAN CA NHUNG DG NGOAI CHUOI DANG CHON
+    ============================================
+    Object tren Panorama la tap CHA: cai gi firewall thay thi Panorama deu co,
+    va con nhieu hon. Nen khi nguoi dung go mot IP/ten co that ma tool bao
+    "khong tim thay", loi la o TOOL - va cau tra loi dung khong phai mot cau
+    ra dieu kien ("co the no nam o DG khac") ma la mot cau KHANG DINH: no nam
+    o DG nao.
+
+    Ca config Panorama da nam san trong bo nho (`config_root`), nen quet het
+    moi Device Group KHONG ton them mot lenh API nao.
+    """
+    out = []
+    shared = config_root.find("shared")
+    if shared is not None:
+        out.append(("shared", parse_address_objects(shared),
+                    parse_address_groups(shared)))
+    for name, el in sorted(_devicegroup_entries(config_root).items()):
+        out.append((name, parse_address_objects(el), parse_address_groups(el)))
+    return out
+
+
 def merge_layered_objects(config_root: ET.Element, dg_name: str) -> Dict[str, Dict]:
     """Nạp toàn bộ Address/Service Object+Group theo 0.2: Shared truoc, DG xa
     DE DG gan hon neu trung ten. Tra ve dict:

@@ -248,6 +248,12 @@ def _find_shadowing_rule(rule_infos: List[RuleInfo], candidate: RuleInfo,
             continue
         if ri.rule.disabled or ri.rule.action == 'allow':
             continue
+        # Mot deny CHI ap cho vai Application (vd chi chan `ping`) thi KHONG
+        # chan traffic L3-L4 dang hoi - canh bao "BI CHAN TRUOC" o day la
+        # canh bao GIA, va mot canh bao bi coi la nhieu thi lan sau no THAT
+        # cung bi bo qua. Xem docstring _app_restricted().
+        if _app_restricted(ri.rule):
+            continue
         if _ports_covered_for_shadow(ri.service, ports) and \
            _side_all_for_shadow(ri.source, src_ranges) and \
            _side_all_for_shadow(ri.dest, dst_ranges):
@@ -1197,6 +1203,11 @@ def apply_candidate_overlay(res: RowResult, row: RequestRow,
         for ri in candidate_rule_infos:
             if ri.rule.action != 'allow' or ri.rule.disabled:
                 continue
+            # Mot rule candidate CHI bat vai Application thi KHONG bao dam traffic
+            # L3-L4 nay di duoc - danh dau "da co trong file candidate" la bao DA
+            # XONG VIEC cho mot thu chua xong. Xem docstring _app_restricted().
+            if _app_restricted(ri.rule):
+                continue
             score = sum(1 for (s, e, _t) in src_ranges if _addr_covers(ri.source, s))
             score += sum(1 for (s, e, _t) in dst_ranges if _addr_covers(ri.dest, s))
             if _ports_covered_any_aware(ri.service, ports):
@@ -1249,6 +1260,38 @@ def _addr_scope_size(resolved: ResolvedAddr) -> float:
     return resolved.total_address_count()
 
 
+def _app_restricted(rule) -> Optional[str]:
+    """Rule nay CO gioi han Application khong? Tra ve mo ta, None = khong.
+
+    CONG CHAN APPLICATION (10/2026 - loi nguoi van hanh bao o nhanh audit, cung
+    goc re nhung o day hau qua nguoc lai).
+
+    Cau hinh that hay co rule:
+        src=any  dst=any  service=any  zone=any  application=[ping, traceroute]
+
+    Truoc day tool khong he doc cot Application khi service la port thuong, nen
+    mot request Oracle tcp/1521 se khop rule nay va duoc bao "TOP1 - traffic DA
+    DUOC PHEP, khong can lam gi". Thuc te firewall chi cho ping/traceroute di;
+    nguoi van hanh tin tool, khong tao rule, va traffic van khong thong.
+
+    Bo tool nay lam viec o muc L3-L4: no KHONG biet traffic se bi App-ID nhan
+    dang thanh ung dung nao, nen KHONG the ket luan mot rule gioi han App-ID co
+    cho traffic do di hay khong. Vi vay rule loai nay:
+      * KHONG duoc lam ket qua (TOP1/TOP1.1/TOP2/TOP3);
+      * KHONG duoc dem ra khuyen "+ ADD" (them Source vao do cung vo ich neu
+        App-ID khong khop);
+      * KHONG duoc tinh la deny chan truoc (mot deny chi ap cho ping thi khong
+        chan Oracle that).
+    `application-default` KHONG tinh la gioi han o day: no la cach khai SERVICE
+    theo app, va da duoc xu ly rieng trong ResolvedService.
+    """
+    apps = [a.strip() for a in (getattr(rule, 'application', None) or []) if a and a.strip()]
+    low = {a.lower() for a in apps}
+    if not low or 'any' in low:
+        return None
+    return ', '.join(apps[:4]) + (f' (+{len(apps) - 4})' if len(apps) > 4 else '')
+
+
 def _scan_all_tiers(rule_infos: List[RuleInfo], src_ranges, dst_ranges, ports,
                      zone_lookup: Optional[List[Tuple[int, int, int, str]]] = None) -> dict:
     """TOI UU HIEU NANG (khong doi 1 chut ket qua/luat nao so voi ban truoc) - gop 5
@@ -1291,6 +1334,12 @@ def _scan_all_tiers(rule_infos: List[RuleInfo], src_ranges, dst_ranges, ports,
     for ri in rule_infos:
         if ri.rule.action != 'allow' or ri.rule.disabled:
             continue
+        # CONG CHAN APPLICATION - xem docstring _app_restricted(). Dat ngay day,
+        # TRUOC moi tinh toan cover, vi phep thu la re nhat ma loai duoc dung
+        # cai rule any/any/any-chi-bat-vai-app thuong nam dau rulebase.
+        if _app_restricted(ri.rule):
+            continue
+
 
         both_any = _both_sides_any(ri)
 
@@ -1730,6 +1779,12 @@ def _find_blocking_deny_rule(rule_infos: List[RuleInfo], src_ranges, dst_ranges,
     rule chan."""
     for ri in rule_infos:
         if ri.rule.disabled or ri.rule.action == 'allow':
+            continue
+        # Mot deny CHI ap cho vai Application (vd chi chan `ping`) thi KHONG
+        # chan traffic L3-L4 dang hoi - canh bao "BI CHAN TRUOC" o day la
+        # canh bao GIA, va mot canh bao bi coi la nhieu thi lan sau no THAT
+        # cung bi bo qua. Xem docstring _app_restricted().
+        if _app_restricted(ri.rule):
             continue
         if not (_ports_covered_for_shadow(ri.service, ports) and
                 _side_all_for_shadow(ri.source, src_ranges) and

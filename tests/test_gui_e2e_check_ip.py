@@ -213,8 +213,26 @@ class TestCheckIpGuiEndToEnd(unittest.TestCase):
                        label="chay xong va mo khoa lai UI")
 
             # 1) Bam Check: ket qua hien THANG tren bang, KHONG ghi file nao.
-            self.assertTrue(app.tree.get_children(),
+            self.assertTrue(app.txt_res.get("1.0", "end").strip(),
                             "chay xong ma bang ket qua van rong")
+
+            # Bang phai mang theo MAU - do la cach duy nhat doc mot dong rule
+            # ma biet ngay doan nao la IP minh nhap (xanh la) va doan nao la
+            # phan con lai cua group ben kia (do). Doc tag THAT tren widget,
+            # khong doc lai ham dung bang.
+            def _tagged(tag):
+                rng = app.txt_res.tag_ranges(tag)
+                return [app.txt_res.get(rng[i], rng[i + 1])
+                        for i in range(0, len(rng), 2)]
+
+            xanh = " ".join(_tagged("value_matched"))
+            self.assertTrue(xanh, "bang khong to xanh la o dau ca")
+            self.assertTrue(any(ip in xanh for ip in
+                                ("10.10.10.11", "10.10.10.12", "192.168.50.21")),
+                            f"mau xanh la khong roi vao IP da nhap: {xanh[:200]}")
+            self.assertTrue(_tagged("value"),
+                            "khong co doan nao to do - o phia ben kia rule lai "
+                            "bi thu gon con ten group")
             self.assertEqual(sorted(set(os.listdir(self.out_dir)) - before), [],
                              "bam Check ma da tu ghi file - phai cho toi Export")
             self.assertEqual(str(app.btn_export.cget("state")), "normal",
@@ -273,9 +291,7 @@ class TestCheckIpGuiEndToEnd(unittest.TestCase):
 
             shown = app.txt_log.get("1.0", "end")
             # Ket qua Check Object phai nam TREN BANG, khong chi trong o Log.
-            bang = "\n".join(
-                " | ".join(str(v) for v in app.tree.item(i, "values"))
-                for i in app.tree.get_children())
+            bang = app.txt_res.get("1.0", "end")
             self.assertIn("CHECK OBJECT", bang,
                           "bang ket qua khong co muc Check Object")
             self.assertEqual(sorted(set(os.listdir(self.out_dir)) - before), [],

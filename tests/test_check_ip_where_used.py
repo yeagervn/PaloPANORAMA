@@ -284,13 +284,21 @@ class TestTraTheoTenObject(unittest.TestCase):
         self.assertNotIn("xoa duoc", joined)
         self.assertIn("go khoi group", joined)
 
-    def test_ket_luan_xoa_duoc_van_canh_bao_DG_KHAC_va_rule_CUC_BO(self):
-        """Hai cho tool THAT SU chua thay, rieng cua ban Panorama - khac han
-        may policy type khong bat, nen van phai giu."""
+    def test_canh_bao_chi_noi_DUNG_cho_tool_chua_do(self):
+        """Canh bao phai la mot cau DO DUOC, khong phai cau ra dieu kien.
+
+        Ban truoc con them "hoac o rule CUC BO tren chinh firewall (ngoai tam
+        quan ly Panorama)". Nguoi van hanh bac bo: o he thong nay Panorama la
+        tap CHA - cai gi firewall co thi Panorama deu co. Menh de do vua sai
+        vua lam hong ket luan, vi bien mot cau tra loi do duoc thanh mot cau
+        khong ai kiem chung duoc.
+        """
         from check_ip_pan.where_used import UNUSED_WARN_DG
 
         self.assertIn("Device Group KHAC", UNUSED_WARN_DG)
-        self.assertIn("CUC BO", UNUSED_WARN_DG)
+        self.assertNotIn("CUC BO", UNUSED_WARN_DG,
+                         "van con menh de 'rule cuc bo tren firewall' da bi bac bo")
+        self.assertNotIn("firewall", UNUSED_WARN_DG.lower())
 
     def test_object_o_tang_SHARED_thi_canh_bao_MANH_HON(self):
         """Object o Shared/DG cha thi MOI nhanh DG con deu nhin thay."""

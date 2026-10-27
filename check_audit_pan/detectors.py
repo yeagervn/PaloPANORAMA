@@ -11,7 +11,7 @@ detectors.py - 3 ham phat hien cua CHECK AUDIT (Mục 4 require.md):
 
 import bisect
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Set
 
 from .core import (
     Finding, RuleSnapshot, RuleHitStat,
@@ -248,11 +248,65 @@ def _zones_cover_fast(i1: int, i2: int, from_any, to_any, from_zone_sets, to_zon
     return to_zone_sets[i1] >= to_zone_sets[i2]
 
 
+def _app_set(rule: RuleSnapshot) -> Optional[Set[str]]:
+    """Tap Application cua 1 rule. None = KHONG gioi han (any).
+
+    PAN-OS de trong cot Application la khong hop le, nhung config that van co
+    rule bi trong sau khi migrate - coi nhu 'any' (khong gioi han) la phia AN
+    TOAN cho rule BI che, va phia khong an toan cho rule DI che; ca hai huong
+    deu duoc xu ly o `_apps_cover`.
+    """
+    apps = {a.strip().lower() for a in (rule.application or []) if a and a.strip()}
+    if not apps or "any" in apps:
+        return None
+    return apps
+
+
+def _apps_cover(r1: RuleSnapshot, r2: RuleSnapshot) -> bool:
+    """R1 co BAO duoc R2 tren chieu APPLICATION khong?
+
+    DAY LA LOI TUNG LAM TOOL KHUYEN XOA NHAM RULE DANG DUNG.
+    ================================================================
+    Cau hinh that rat hay co mot rule dau rulebase kieu:
+
+        src=any  dst=any  service=any  zone=any  application=[ping, traceroute]
+
+    Truoc day phep "che" chi xet zone/source/destination/service, nen rule nay
+    BAO HET moi rule nam duoi no - tool bao ca rulebase la "shadow, khong bao
+    gio chay toi" va nguoi van hanh di xoa. Thuc te no CHI cho ping/traceroute
+    di; moi traffic khac van phai nho dung nhung rule vua bi xoa. Hau qua la
+    mat dich vu, va mat theo kieu kho lan ra nhat: rule bi xoa, log khong con
+    gi de doi chieu.
+
+    LUAT:
+      * R1 khong gioi han app (any)      -> bao duoc moi thu.
+      * R1 CO gioi han, R2 khong gioi han -> KHONG bao (R2 cho ca app khac).
+      * Ca hai cung gioi han              -> bao khi tap cua R2 nam trong R1.
+
+    CO Y BAO THU: ten app-group / application-filter so theo TEN. Hai ben viet
+    khac ten nhung thuc chat trung nhau thi ham nay tra False - tuc la KHONG
+    ket luan shadow. Sai theo huong nay chi lam bo sot mot de xuat don dep;
+    sai theo huong kia lam mat dich vu.
+    """
+    a1 = _app_set(r1)
+    if a1 is None:
+        return True
+    a2 = _app_set(r2)
+    if a2 is None:
+        return False
+    return a2 <= a1
+
+
 def _covers_rule_fast(r1: RuleSnapshot, r2: RuleSnapshot, i1: int, i2: int,
                       from_any, to_any, from_zone_sets, to_zone_sets) -> bool:
     """Ban FAST cua _covers_rule() cho vong lap O(n^2): zone precomputed, thu tu
     kiem tra re->dat giu nguyen. `r1.disabled` da duoc loc truoc qua
     `enabled_indices` nen khong check lai o day."""
+    # Application dung DAU: phep so hai tap ten la re nhat trong nam chieu, ma
+    # no lai loai duoc dung cai rule any/any/any-chi-bat-vai-app von dung dau
+    # rulebase nen bi dem ra so voi MOI rule ben duoi.
+    if not _apps_cover(r1, r2):
+        return False
     if not _zones_cover_fast(i1, i2, from_any, to_any, from_zone_sets, to_zone_sets, True):
         return False
     if not _zones_cover_fast(i1, i2, from_any, to_any, from_zone_sets, to_zone_sets, False):

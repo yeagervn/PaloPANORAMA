@@ -32,6 +32,7 @@ in day du moi member nen can chi ra cai nao la IP dang tra; o bang thi da loc
 san roi, danh dau them chi lam ban mat.
 """
 
+import re as _re
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 RULE_HEADERS = ("Name Rule", "Vi tri", "Source IP", "Dest IP", "Service",
@@ -109,20 +110,25 @@ def rule_rows(rules, match_results, resolver, service_objects, service_groups,
         if not hit:
             continue
         ips = target_ips or hit["ips"]
-        out.append({"kind": "rule", "disabled": bool(rule.disabled), "cells": _pad([
-            rule.name,
-            getattr(rule, "vi_tri", ""),
-            _one_line(_runs_plain_text(_build_address_runs(
-                rule.source, resolver, ips, filter_to_matched=True))),
-            _one_line(_runs_plain_text(_build_address_runs(
-                rule.destination, resolver, ips, filter_to_matched=True))),
-            _one_line(_build_service_plain(rule.service, service_objects, service_groups)),
-            " + ".join(sorted(hit["sides"])),
-            ", ".join(rule.from_zones),
-            ", ".join(rule.to_zones),
-            ", ".join(rule.application),
-            ("[DISABLED] " if rule.disabled else "") + rule.action,
-        ])})
+        cells_runs = [
+            _cell_runs(rule.name),
+            _cell_runs(getattr(rule, "vi_tri", "")),
+            _runs_one_line(_build_address_runs(
+                rule.source, resolver, ips, filter_to_matched=True)),
+            _runs_one_line(_build_address_runs(
+                rule.destination, resolver, ips, filter_to_matched=True)),
+            _cell_runs(_one_line(_build_service_plain(
+                rule.service, service_objects, service_groups))),
+            _cell_runs(" + ".join(sorted(hit["sides"]))),
+            _cell_runs(", ".join(rule.from_zones)),
+            _cell_runs(", ".join(rule.to_zones)),
+            _cell_runs(", ".join(rule.application)),
+            _cell_runs(("[DISABLED] " if rule.disabled else "") + rule.action),
+        ]
+        out.append({"kind": "rule", "disabled": bool(rule.disabled),
+                    "runs": _pad_runs(cells_runs),
+                    "cells": _pad(["".join(t for _, t in c).strip()
+                                   for c in cells_runs])})
     if not out:
         out.append(note_row("Khong co Security Rule nao neu dich danh cac IP nay."))
     return out
@@ -141,23 +147,29 @@ def nat_rows(nat_rules, resolver, service_objects, service_groups,
     ips = set(target_ips or [])
     out: List[Dict[str, Any]] = []
     for rule in nat_rules or []:
-        out.append({"kind": "nat", "disabled": bool(rule.disabled), "cells": _pad([
-            rule.name,
-            getattr(rule, "vi_tri", ""),
-            _one_line(_runs_plain_text(_build_address_runs(
-                rule.source, resolver, ips, filter_to_matched=search_mode))),
-            _one_line(_runs_plain_text(_build_address_runs(
-                rule.destination, resolver, ips, filter_to_matched=search_mode))),
-            _one_line(_build_service_plain([rule.service], service_objects, service_groups)),
-            rule.nat_type,
-            ", ".join(rule.from_zones),
-            ", ".join(rule.to_zones),
-            _one_line(_SRC_XLATE_TYPE_LABEL.get(rule.src_xlate_type, rule.src_xlate_type)
-                      + " " + _runs_plain_text(_nat_src_xlate_runs(
-                          rule, resolver, ips, filter_to_matched=search_mode))),
-            _one_line(_runs_plain_text(_nat_dst_xlate_runs(
-                rule, resolver, ips, filter_to_matched=search_mode))),
-        ])})
+        cells_runs = [
+            _cell_runs(rule.name),
+            _cell_runs(getattr(rule, "vi_tri", "")),
+            _runs_one_line(_build_address_runs(
+                rule.source, resolver, ips, filter_to_matched=search_mode)),
+            _runs_one_line(_build_address_runs(
+                rule.destination, resolver, ips, filter_to_matched=search_mode)),
+            _cell_runs(_one_line(_build_service_plain(
+                [rule.service], service_objects, service_groups))),
+            _cell_runs(rule.nat_type),
+            _cell_runs(", ".join(rule.from_zones)),
+            _cell_runs(", ".join(rule.to_zones)),
+            [("text", _SRC_XLATE_TYPE_LABEL.get(rule.src_xlate_type,
+                                                rule.src_xlate_type) + " ")]
+            + _runs_one_line(_nat_src_xlate_runs(
+                rule, resolver, ips, filter_to_matched=search_mode)),
+            _runs_one_line(_nat_dst_xlate_runs(
+                rule, resolver, ips, filter_to_matched=search_mode)),
+        ]
+        out.append({"kind": "nat", "disabled": bool(rule.disabled),
+                    "runs": _pad_runs(cells_runs),
+                    "cells": _pad(["".join(t for _, t in c).strip()
+                                   for c in cells_runs])})
     if not out:
         out.append(note_row("Khong co NAT rule nao khop."))
     return out
@@ -238,3 +250,177 @@ def log_rows(log_entries, rules, resolver, service_objects, service_groups
     if not out:
         out.append(note_row("File Log khong co dong traffic hop le nao."))
     return out
+
+# ===========================================================================
+# DUNG BANG CHU CO TO MAU CHO GIAO DIEN
+# ===========================================================================
+# VI SAO KHONG CON DUNG ttk.Treeview
+# ----------------------------------
+# Treeview chi to mau duoc CA MOT DONG (theo tag), khong to duoc mot DOAN CHU
+# ben trong mot o. Nhung chinh cai doan chu do moi la thong tin: trong o
+# Source/Dest cua mot rule, "10.3.16.11" la IP dang tra (xanh la) con nhung
+# member khac cua group la phan chi de doc (do). Mat mau la nguoi doc lai phai
+# tu do mat so tung dong - dung cai viec ma file Excel xuat ra da lam duoc tu
+# lau (xem `_runs_to_rich_text`).
+#
+# Nen bang tren giao dien duoc dung bang mot widget Text: moi o duoc ngat dong
+# trong DUNG be ngang cua cot no, va tung doan chu duoc dan tag rieng.
+#
+# Toan bo phan tinh toan nam o day - ham THUAN, khong `import tkinter` - de
+# test duoc tren trinh thong dich khong co Tk. gui.py chi con viec doc
+# `segments` roi `insert`.
+
+#: Be ngang (so ky tu) cua 10 cot - ban Panorama co them cot 'Vi tri'. Font trong bang la font DEU, nen so ky tu
+#: la do do that su.
+COL_WIDTHS = (26, 16, 46, 46, 22, 13, 14, 14, 18, 12)
+#: Khoang cach giua 2 cot.
+COL_GAP = "  "
+
+_WS = _re.compile(r"\s+")
+
+
+def _runs_one_line(runs: Sequence[Tuple[str, str]]) -> List[Tuple[str, str]]:
+    """Gop moi khoang trang/xuong dong trong tung run thanh MOT dau cach.
+
+    Khong dung `_one_line()` cho ca chuoi: lam vay se an mat dau cach o dau/
+    cuoi tung run, tuc la hai run dinh lien nhau ("GRP-A" + ", " -> "GRP-A,"
+    mat luon dau cach sau dau phay).
+    """
+    out: List[Tuple[str, str]] = []
+    for kind, text in runs:
+        t = _WS.sub(" ", str(text or ""))
+        if t:
+            out.append((kind, t))
+    return out
+
+
+def _cell_runs(value: Any) -> List[Tuple[str, str]]:
+    return [("text", "" if value is None else str(value))]
+
+
+def _pad_runs(cells_runs: Sequence[Sequence[Tuple[str, str]]]
+              ) -> Tuple[List[Tuple[str, str]], ...]:
+    out = [list(c) for c in cells_runs][:NCOL]
+    while len(out) < NCOL:
+        out.append([("text", "")])
+    return tuple(out)
+
+
+def _chunks(runs: Sequence[Tuple[str, str]]) -> List[Tuple[str, str]]:
+    """Cat runs thanh cac 'tu' duoc phep ngat dong GIUA chung.
+
+    Cat SAU dau cach / dau phay / dau mo ngoac - tuc la dau phan cach di theo
+    tu dung truoc no, nen dong moi khong bao gio bat dau bang dau phay.
+    """
+    out: List[Tuple[str, str]] = []
+    for kind, text in runs:
+        for part in _re.split(r"(?<=[ ,(])", str(text or "")):
+            if part:
+                out.append((kind, part))
+    return out
+
+
+def wrap_runs(runs: Sequence[Tuple[str, str]], width: int
+              ) -> List[List[Tuple[str, str]]]:
+    """Ngat `runs` thanh cac dong rong toi da `width` ky tu.
+
+    Mot 'tu' dai hon ca be ngang cot (ten object dai, chuoi IP-IP) thi bi cat
+    CUNG thay vi day cot phinh ra - cot phinh ra la ca bang lech.
+    """
+    lines: List[List[Tuple[str, str]]] = []
+    cur: List[Tuple[str, str]] = []
+    cur_len = 0
+    for kind, text in _chunks(runs):
+        while text:
+            if cur_len == 0:
+                text = text.lstrip(" ")     # khong mo dau dong bang dau cach
+                if not text:
+                    break
+            room = width - cur_len
+            if len(text) <= room:
+                piece, text = text, ""
+            elif cur_len == 0:
+                piece, text = text[:room], text[room:]
+            else:
+                lines.append(cur)
+                cur, cur_len = [], 0
+                continue
+            cur.append((kind, piece))
+            cur_len += len(piece)
+            if cur_len >= width and text:
+                lines.append(cur)
+                cur, cur_len = [], 0
+    if cur or not lines:
+        lines.append(cur)
+    return lines
+
+
+def row_tag(row: Dict[str, Any]) -> str:
+    """Tag cho CA DONG (mau nen/mau chu nen). '' = dong thuong.
+
+    De o day chu khong o gui.py vi day la luat trinh bay, va luat thi phai
+    test duoc ma khong can mo cua so.
+    """
+    kind = row.get("kind")
+    if kind in ("section", "hdr", "note"):
+        return kind
+    if kind == "log":
+        return "ok" if row.get("ok") else "no"
+    return "off" if row.get("disabled") else ""
+
+
+def is_data_row(row: Dict[str, Any]) -> bool:
+    return row.get("kind") not in ("section", "hdr", "note")
+
+
+def layout(display: Sequence[Dict[str, Any]],
+           widths: Sequence[int] = COL_WIDTHS,
+           gap: str = COL_GAP) -> List[Dict[str, Any]]:
+    """Doi danh sach dong ket qua thanh danh sach DONG MAN HINH.
+
+    Moi dong man hinh: {"tag": <tag ca dong>, "segments": [(tag_doan, chu)...]}.
+    Mot dong ket qua co the trai ra nhieu dong man hinh (o nao dai thi xuong
+    dong TRONG cot cua no) - khong cat bot chu nao.
+    """
+    full = sum(widths) + len(gap) * (len(widths) - 1)
+    out: List[Dict[str, Any]] = []
+    for row in display:
+        tag = row_tag(row)
+        cells = row.get("runs") or [_cell_runs(c) for c in row["cells"]]
+
+        # Dong tieu de muc / ghi chu KHONG chia cot: nhet mot cau dai vao o dau
+        # tien rong 26 ky tu thi no xuong dong lam ba bon khuc, trong nhu bang
+        # bi vo. Cho no trai het be ngang bang.
+        if tag in ("section", "note"):
+            runs: List[Tuple[str, str]] = []
+            for cell in cells:
+                if not "".join(t for _, t in cell).strip():
+                    continue
+                if runs:
+                    runs.append(("text", "  "))
+                runs.extend(cell)
+            for line in wrap_runs(_runs_one_line(runs), full):
+                used = sum(len(t) for _, t in line)
+                out.append({"tag": tag, "segments": list(line) +
+                            ([("text", " " * (full - used))] if used < full else [])})
+            continue
+        wrapped = [wrap_runs(_runs_one_line(c), w)
+                   for c, w in zip(cells, widths)]
+        for i in range(max(len(w) for w in wrapped)):
+            segs: List[Tuple[str, str]] = []
+            for ci, (w, width) in enumerate(zip(wrapped, widths)):
+                if ci:
+                    segs.append(("text", gap))
+                line = w[i] if i < len(w) else []
+                segs.extend(line)
+                used = sum(len(t) for _, t in line)
+                if used < width:
+                    segs.append(("text", " " * (width - used)))
+            out.append({"tag": tag, "segments": segs})
+    return out
+
+
+def layout_plain(display: Sequence[Dict[str, Any]], **kw) -> str:
+    """Ban chu tron cua `layout()` - dung cho test va cho log."""
+    return "\n".join("".join(t for _, t in ln["segments"]).rstrip()
+                     for ln in layout(display, **kw))

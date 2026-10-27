@@ -102,18 +102,23 @@ def _expand_entry_runs(entry: str, resolver: GroupResolver, target_ips: Set[str]
         resolved = resolver.resolve(entry)  # da cache tu buoc build_index, O(1)
         all_members = sorted(resolved.member_details, key=lambda t: (t[0] or "", t[1]))
         if filter_to_matched:
-            # CHI hien member co value TRUNG voi 1 trong cac IP dang tim.
+            # GROUP CO BAO IP DANG TRA -> chi hien dung member bao no (xanh la).
+            # Mot group co hang chuc member, nhan len hai phia cua hang chuc
+            # rule, thi in het la nguoi doc phai tu do mat tim xem IP minh nhap
+            # nam o dau.
             #
-            # THAY DOI (10/2026 - theo yeu cau): truoc day neu group KHONG co
-            # member nao lien quan (vd group o phia con lai cua rule) thi in
-            # TOAN BO member. Mot group co hang chuc member, nhan len hai phia
-            # cua hang chuc rule, la nguoi doc phai tu do mat tim xem IP minh
-            # nhap nam o dau. Nay khong lien quan thi CHI in TEN group - dung
-            # tinh than "output chi hien thong tin cua IP input".
+            # GROUP KHONG LIEN QUAN (phia ben kia rule) -> VAN break ra DU
+            # member, mau do.
+            #   Ban 10/2026 dau tien thu gon ca cum nay con DUNG MOT CAI TEN
+            #   group. Nguoi van hanh bao sai: doc mot dong rule ma chi thay
+            #   "GRP-DC-SERVERS" thi khong tra loi duoc cau hoi ke tiep - "the
+            #   dau ben kia la nhung IP nao?" - va lai phai mo thiet bi ra xem,
+            #   dung viec ma tool phai lam thay. Mau da phan biet san: xanh la
+            #   = IP dang tra, do = phan con lai (chi de doc).
             members = [(n, v) for (n, v) in all_members
                        if _member_matches_target(v, target_ips)]
             if not members:
-                return [("name", entry)]
+                members = all_members
         else:
             # Dung cho Export bang NAT (muc 4 GUI): LUON hien THAT DAY DU moi
             # member (khong loc bo) - chi khac mau (xanh la neu trung IP nhap
