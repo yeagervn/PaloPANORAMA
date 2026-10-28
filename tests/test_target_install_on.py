@@ -220,6 +220,104 @@ class TestBangChungHitCountTheoTarget(unittest.TestCase):
                          "firewall 0033CCCC CO rule nay ma thieu so lieu - van phai la khong biet")
 
 
+XML_SERIAL_LA = """<config>
+ <shared/>
+ <devices><entry name="localhost.localdomain"><device-group>
+   <entry name="DG-ALL">
+     <pre-rulebase><security><rules>
+      <entry name="R-SHARED-CHA">
+       <from><member>any</member></from><to><member>any</member></to>
+       <source><member>any</member></source><destination><member>any</member></destination>
+       <service><member>any</member></service><application><member>any</member></application>
+       <target><devices><entry name="{B}"/></devices></target>
+       <action>allow</action>
+      </entry>
+     </rules></security></pre-rulebase>
+   </entry>
+   <entry name="DG-HN">
+     <parent-dg>DG-ALL</parent-dg>
+     <devices><entry name="{A}"/></devices>
+     <pre-rulebase><security><rules>
+      <entry name="R-TARGET-CHET">
+       <from><member>any</member></from><to><member>any</member></to>
+       <source><member>any</member></source><destination><member>any</member></destination>
+       <service><member>any</member></service><application><member>any</member></application>
+       <target><devices><entry name="{B}"/></devices></target>
+       <action>allow</action>
+      </entry>
+      <entry name="R-TARGET-SONG">
+       <from><member>any</member></from><to><member>any</member></to>
+       <source><member>any</member></source><destination><member>any</member></destination>
+       <service><member>any</member></service><application><member>any</member></application>
+       <target><devices><entry name="{A}"/></devices></target>
+       <action>allow</action>
+      </entry>
+      <entry name="R-TARGET-MOT-NUA">
+       <from><member>any</member></from><to><member>any</member></to>
+       <source><member>any</member></source><destination><member>any</member></destination>
+       <service><member>any</member></service><application><member>any</member></application>
+       <target><devices><entry name="{A}"/><entry name="{B}"/></devices></target>
+       <action>allow</action>
+      </entry>
+     </rules></security></pre-rulebase>
+   </entry>
+ </device-group></entry></devices>
+</config>""".replace("{A}", SITE_A).replace("{B}", SITE_B)
+
+
+class TestTargetTroToiSerialKhongThuocDG(unittest.TestCase):
+    """Rule target toi serial KHONG thuoc Device Group = rule CHET.
+
+    No trong nhu dang chay nhung khong duoc push xuong dau ca. Hay gap sau khi
+    thay the thiet bi (RMA) ma quen sua target.
+    """
+
+    def _note(self):
+        cfg = parse_config_root(ET.fromstring(XML_SERIAL_LA), "DG-HN", None)
+        return dict(cfg["target_note"]["rule_target_serial_la"])
+
+    def test_bat_duoc_rule_target_toi_serial_LA(self):
+        self.assertIn("R-TARGET-CHET", self._note())
+        self.assertEqual(self._note()["R-TARGET-CHET"], [SITE_B])
+
+    def test_rule_target_dung_firewall_cua_DG_thi_IM_LANG(self):
+        self.assertNotIn("R-TARGET-SONG", self._note())
+
+    def test_con_IT_NHAT_MOT_serial_hop_le_thi_KHONG_bao(self):
+        """Rule van duoc push xuong {A} - no song, khong phai rule chet."""
+        self.assertNotIn("R-TARGET-MOT-NUA", self._note())
+
+    def test_rule_cua_DG_CHA_thi_KHONG_bao(self):
+        """Rule o Shared / DG cha co the target hop le toi firewall cua mot
+        nhanh DG khac - bao o day la canh bao GIA."""
+        self.assertNotIn("R-SHARED-CHA", self._note())
+
+
+class TestOKetQuaNoiRoRuleChiApChoFirewallNao(unittest.TestCase):
+    def _cell_text(self, target):
+        from check_rule_pan.core import SecurityRule
+        from check_rule_pan.exporter import build_name_rule_cell
+        from check_rule_pan.matcher import RowResult
+        from check_rule_pan.request import RequestRow
+
+        rule = SecurityRule(0, "R", ["any"], ["any"], ["any"], ["any"],
+                            "allow", False, target_devices=list(target))
+        row = RequestRow(1, [], [], [], [], "", "", "")
+        res = RowResult(row, "TOP1", rule)
+        cell = build_name_rule_cell(res)
+        return "".join(str(b) for b in (cell[0] if isinstance(cell, tuple) else cell))
+
+    def test_co_target_thi_NOI_RO_chi_ap_cho_firewall_nao(self):
+        txt = self._cell_text([SITE_A])
+        self.assertIn("CHI AP CHO FIREWALL", txt)
+        self.assertIn(SITE_A, txt)
+
+    def test_KHONG_co_target_thi_KHONG_them_dong_nao(self):
+        """Rule ap cho moi firewall la truong hop pho bien nhat - them dong o
+        day la bien thong tin that thanh nhieu."""
+        self.assertNotIn("CHI AP CHO FIREWALL", self._cell_text([]))
+
+
 class TestPredefinedService(unittest.TestCase):
     """`service-http` la HAI port roi rac 80 VA 8080 - KHONG phai dai 80-8080.
 

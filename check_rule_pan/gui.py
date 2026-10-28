@@ -628,6 +628,12 @@ class PANOSCheckerGUI(ttk.Frame):
                                   f"xuống firewall cụ thể ({_ten}). CHƯA chọn Target Firewall "
                                   f"nên tool GIỮ HẾT - kết quả có thể chỉ đúng với một số site. "
                                   f"Nhập serial ở ô Target Firewall để lọc đúng site cần hỏi.")
+                for _ten_rule, _ngoai in (_tn.get('rule_target_serial_la') or []):
+                    self._log(f"CẢNH BÁO: rule '{_ten_rule}' target tới serial "
+                              f"{', '.join(_ngoai)} - KHÔNG serial nào thuộc Device "
+                              f"Group '{self.dg_used}'. Rule này không được push "
+                              f"xuống firewall nào cả (hay gặp sau khi thay thiết bị "
+                              f"mà quên sửa target).")
 
                 # 0.5/0.6: kiem tra cheo Target Firewall voi DG dang chon
                 self.vsys_for_live = self._detect_vsys_for_target(root_el, target_serial)

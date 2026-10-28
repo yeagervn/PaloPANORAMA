@@ -1019,10 +1019,26 @@ def parse_config_root(root, dg_name: Optional[str] = None,
             r.index = i
     else:
         bi_loai = 0
+    # SERIAL LA, tro toi mot firewall KHONG thuoc Device Group nay: rule do
+    # khong duoc push xuong dau ca - no trong nhu dang chay nhung thuc te la
+    # rule CHET. Hay gap sau khi thay the thiet bi (RMA) ma quen sua target.
+    # Chi xet rule do CHINH DG dang chon so huu: rule o Shared / DG cha co the
+    # target hop le toi firewall cua mot nhanh DG khac.
+    dg_serials = set(devicegroup_devices(root, dg_name))
+    serial_la: List[Tuple[str, List[str]]] = []
+    if dg_serials:
+        for r in rules_co_target:
+            if r.dg != dg_name or r.target_negate:
+                continue
+            ngoai = [d for d in r.target_devices if d not in dg_serials]
+            if ngoai and len(ngoai) == len(r.target_devices):
+                serial_la.append((r.name, ngoai))
+
     target_note = {
         'rules_co_target': len(rules_co_target),
         'bi_loai_vi_target': bi_loai,
         'ten_rule_co_target': [r.name for r in rules_co_target[:10]],
+        'rule_target_serial_la': serial_la,
     }
 
     # 0.6 - zone lay tu Template cua Target Firewall (khong co target -> tu vo hieu)

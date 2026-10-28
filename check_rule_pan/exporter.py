@@ -619,6 +619,16 @@ def _build_name_rule_cell_core(res: RowResult):
         blocks.append(TextBlock(_f(RED_FONT, bold=True), extra))
         text += extra
 
+    # TARGET / INSTALL-ON: rule nay chi duoc push xuong vai firewall cu the.
+    # Mot Device Group dung chung cho nhieu site thi cau tra loi "da duoc phep"
+    # CHI dung voi may con firewall do - thieu dong nay la nguoi doc tuong no
+    # dung cho ca DG. Chi in khi rule THAT SU co target, nen khong thanh nhieu.
+    _tgt = getattr(res.rule, 'target_text', '') if res.rule else ''
+    if _tgt:
+        extra = f"\n\u26A0 RULE CHI AP CHO FIREWALL: {_tgt}"
+        blocks.append(TextBlock(_f(ZONE_FONT, bold=True), extra))
+        text += extra
+
     if res.zone_warning:
         extra = f"\n\u26A0 THIEU ZONE: {res.zone_warning}"
         blocks.append(TextBlock(_f(ZONE_FONT, bold=True), extra))
