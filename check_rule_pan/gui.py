@@ -610,6 +610,25 @@ class PANOSCheckerGUI(ttk.Frame):
                           f"PAN-OS đánh giá (Shared-PRE -> DG-chain-PRE -> DG-chain-POST -> "
                           f"Shared-POST) cho Device Group '{self.dg_used}'.")
 
+                # TARGET / INSTALL-ON: noi ro tool da lam gi voi nhung rule chi
+                # push xuong vai firewall cu the - day la thu lam ket qua khac
+                # han giua cac site, khong duoc im lang.
+                _tn = cfg.get('target_note') or {}
+                if _tn.get('rules_co_target'):
+                    _ten = ", ".join(_tn.get('ten_rule_co_target') or [])
+                    if _tn['rules_co_target'] > len(_tn.get('ten_rule_co_target') or []):
+                        _ten += " ..."
+                    if target_serial:
+                        self._log(f"Target/Install-On: {_tn['rules_co_target']} rule chỉ push "
+                                  f"xuống firewall cụ thể; đã LOẠI {_tn['bi_loai_vi_target']} "
+                                  f"rule KHÔNG nằm trên serial '{target_serial}' - kết quả dưới "
+                                  f"đây là rulebase THẬT của đúng firewall đó.")
+                    else:
+                        self._log(f"Target/Install-On: {_tn['rules_co_target']} rule chỉ push "
+                                  f"xuống firewall cụ thể ({_ten}). CHƯA chọn Target Firewall "
+                                  f"nên tool GIỮ HẾT - kết quả có thể chỉ đúng với một số site. "
+                                  f"Nhập serial ở ô Target Firewall để lọc đúng site cần hỏi.")
+
                 # 0.5/0.6: kiem tra cheo Target Firewall voi DG dang chon
                 self.vsys_for_live = self._detect_vsys_for_target(root_el, target_serial)
                 if target_serial:

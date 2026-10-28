@@ -10,6 +10,7 @@ detectors.py - 3 ham phat hien cua CHECK AUDIT (Mục 4 require.md):
 """
 
 import bisect
+from dataclasses import replace
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Set
 
@@ -300,6 +301,85 @@ def _apps_cover(r1: RuleSnapshot, r2: RuleSnapshot) -> bool:
     return a2 <= a1
 
 
+def trim_evidence_to_target(hit_stats, rules: List[RuleSnapshot]):
+    """Rule chi push xuong vai firewall thi chi DOI bang chung tu dung may con do.
+
+    VI SAO CAN
+    ==========
+    `hits_known` False khi co firewall trong pham vi query ma khong tra ve dong
+    nao cho rule. Mot rule target rieng site B thi firewall site A KHONG HE co
+    rule do, nen no vinh vien "thieu bang chung" -> nhanh UNUSED khong bao gio
+    chay voi nhung rule target rieng site. Im lang khong ket luan la an toan,
+    nhung dong nghia audit KHONG lam gi duoc voi ca mang rulebase do.
+
+    Nay: voi rule co <target>, chi nhung firewall THAT SU duoc push rule moi
+    tinh vao `devices_missing`.
+
+    CHOT AN TOAN: neu sau khi cat ma KHONG con firewall nao tung tra ve so lieu
+    cho rule (devices_seen rong), ham GIU NGUYEN trang thai "thieu bang chung".
+    Khong co cai chot nay thi mot rule target vao serial chua he duoc query se
+    thanh "da biet, 0 hit" -> UNUSED -> de xuat XOA mot rule chua ai do bao gio.
+    """
+    by_name: Dict[str, RuleSnapshot] = {}
+    for r in rules or []:
+        by_name[(r.name, r.vi_tri)] = r          # type: ignore[index]
+        by_name.setdefault(r.name, r)            # type: ignore[index]
+
+    out = dict(hit_stats or {})
+    for key, stat in list(out.items()):
+        rule = by_name.get(key)
+        if rule is None and isinstance(key, tuple):
+            rule = by_name.get(key[0])
+        if rule is None or not rule.target_devices:
+            continue
+        tap = set(rule.target_devices)
+        if rule.target_negate:
+            # "Moi firewall TRU may con nay" -> may con bi tru khong he co rule,
+            # thieu so lieu o do la binh thuong.
+            con_thieu = tuple(d for d in (stat.devices_missing or ()) if d not in tap)
+        else:
+            con_thieu = tuple(d for d in (stat.devices_missing or ()) if d in tap)
+        if con_thieu == tuple(stat.devices_missing or ()):
+            continue
+        if not stat.devices_seen:
+            continue                              # chot an toan - xem docstring
+        moi = replace(stat, devices_missing=con_thieu)
+        out[key] = moi
+    return out
+
+
+def _targets_cover(r1: RuleSnapshot, r2: RuleSnapshot) -> bool:
+    """R1 co ap len DU moi firewall ma R2 ap len khong? (chieu TARGET/INSTALL-ON)
+
+    DAY LA MOT HUONG XOA NHAM RULE DANG CHAY KHAC.
+    ====================================================================
+    He thong that co Device Group dung chung cho nhieu site, va trong do co
+    nhung rule target RIENG tung site. Mot rule cua site B khong he ton tai
+    tren firewall cua site A - no KHONG the che rule cua site A. Truoc day
+    phep "che" khong doc <target> nen van ket luan shadow, roi de xuat xoa
+    rule cua site A: site A mat dich vu, con log thi khong con rule de doi
+    chieu.
+
+    LUAT (giong het cach xet zone/application - phep bao tren mot chieu nua):
+      * R1 khong co <target>            -> ap cho moi firewall -> bao duoc.
+      * R1 co target, R2 khong co       -> R2 ap rong hon -> KHONG bao.
+      * Ca hai deu la danh sach thuong  -> bao khi tap cua R2 nam trong R1.
+      * Co dinh NEGATE o bat ky ben nao -> chi bao khi HAI BEN GIONG HET
+        nhau. "Moi firewall TRU X" va mot danh sach thuong khong so duoc
+        bang phep tap neu khong biet truoc toan bo estate; BAO THU o day chi
+        lam bo sot mot de xuat don dep, con sai huong kia la mat dich vu.
+    """
+    d1 = [x for x in (r1.target_devices or []) if x]
+    d2 = [x for x in (r2.target_devices or []) if x]
+    if not d1 and not r1.target_negate:
+        return True
+    if r1.target_negate or r2.target_negate:
+        return (r1.target_negate == r2.target_negate) and set(d1) == set(d2)
+    if not d2:
+        return False
+    return set(d2) <= set(d1)
+
+
 def _field_is_any(values: Optional[List[str]]) -> bool:
     """O de TRONG hoac dung chu `any` - ca hai deu la "khong gioi han"."""
     vals = {v.strip().lower() for v in (values or []) if v and v.strip()}
@@ -352,6 +432,11 @@ def _covers_rule_fast(r1: RuleSnapshot, r2: RuleSnapshot, i1: int, i2: int,
     # no lai loai duoc dung cai rule any/any/any-chi-bat-vai-app von dung dau
     # rulebase nen bi dem ra so voi MOI rule ben duoi.
     if not _apps_cover(r1, r2):
+        return False
+    # Target/Install-On dung ngay sau Application: cung la phep so hai tap ten,
+    # re hon moi phep tinh dia chi ben duoi, ma lai loai duoc dung truong hop
+    # "rule cua site B di che rule cua site A".
+    if not _targets_cover(r1, r2):
         return False
     if not _zones_cover_fast(i1, i2, from_any, to_any, from_zone_sets, to_zone_sets, True):
         return False

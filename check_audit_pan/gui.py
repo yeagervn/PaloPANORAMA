@@ -35,7 +35,7 @@ from .pan_api import (
 from .resolver import GroupResolver, ServiceResolver
 from .detectors import (
     find_shadow_rules, find_disabled_rules, find_overly_permissive_rules,
-    infrastructure_rules,
+    infrastructure_rules, trim_evidence_to_target,
     find_overly_permissive_by_size, OVERLY_ADDR_THRESHOLD, OVERLY_PORT_THRESHOLD,
 )
 from .excel_io import export_findings, parse_import_file
@@ -464,6 +464,18 @@ class App(ttk.Frame):
                               "không có thiết bị và chưa nhập Target Firewall) → nhánh "
                               "UNUSED (Shadow) bị bỏ qua.")
                     self._log("CANH BAO: chưa chọn Target Firewall (Serial) → so sánh Zone trong 5-điều-kiện-superset sẽ fallback 'luôn coi tương thích' (0.6), có thể báo shadow sai ở trường hợp Zone khác nhau (IV.2.3/IV.7.5).")
+
+            # Rule chi push xuong vai firewall (target/install-on) thi chi doi
+            # bang chung hit-count tu dung may con do - neu khong, nhanh UNUSED
+            # vinh vien im lang voi ca mang rulebase target rieng tung site.
+            if hit_stats:
+                _truoc = sum(1 for st in hit_stats.values() if not st.hits_known)
+                hit_stats = trim_evidence_to_target(hit_stats, rules)
+                _sau = sum(1 for st in hit_stats.values() if not st.hits_known)
+                if _sau < _truoc:
+                    self._log(f"Target/Install-On: {_truoc - _sau} rule nay DA du bang "
+                              f"chung hit-count sau khi chi tinh dung cac firewall "
+                              f"that su duoc push rule do.")
 
             # Rule HA TANG (moi o L3-L4 = any, chi khai Application) duoc BO QUA
             # o ca 3 nhanh de nghi. Noi ra la bo qua nhung rule NAO - bo qua trong

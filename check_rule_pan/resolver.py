@@ -371,11 +371,15 @@ class ResolvedService:
 # truoc gio khong biet toi chung, luon bao "khong tim thay". Mot so admin cung hay dat
 # rule/group tham chieu bang ten ngan "http"/"https" (khong co tien to "service-") - them
 # ca 2 dang de bao phu thuc te thuong gap.
+# SUA 10/2026 theo xac nhan tu he thong that: `service-http` la HAI port roi
+# rac 80 VA 8080 - KHONG phai dai 80-8080. Viet nham thanh dai thi no se phu
+# luon tcp/1521, tcp/3389... tuc la bao "da duoc phep" cho gan nhu moi thu.
+# Vi vay cau truc o day la DANH SACH tung dai, khong phai mot dai duy nhat.
 _PREDEFINED_SERVICES = {
-    'service-http': ('tcp', 80, 80),
-    'service-https': ('tcp', 443, 443),
-    'http': ('tcp', 80, 80),
-    'https': ('tcp', 443, 443),
+    'service-http': [('tcp', 80, 80), ('tcp', 8080, 8080)],
+    'service-https': [('tcp', 443, 443)],
+    'http': [('tcp', 80, 80)],
+    'https': [('tcp', 443, 443)],
 }
 
 
@@ -434,12 +438,13 @@ class ServiceResolver:
 
         pre = _PREDEFINED_SERVICES.get(name.strip().lower()) if name else None
         if pre is not None:
-            proto, a, b = pre
-            if a == b:
-                r.exact_ports.add((proto, a))
-            else:
-                r.ranges.append((proto, a, b))
-            r.member_details.append((name, f"{proto}/{a}" if a == b else f"{proto}/{a}-{b}"))
+            for proto, a, b in pre:
+                if a == b:
+                    r.exact_ports.add((proto, a))
+                else:
+                    r.ranges.append((proto, a, b))
+                r.member_details.append(
+                    (name, f"{proto}/{a}" if a == b else f"{proto}/{a}-{b}"))
             self._cache[name] = r
             return r
 

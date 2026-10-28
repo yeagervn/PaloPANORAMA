@@ -644,6 +644,7 @@ def parse_security_rules_in(container: ET.Element, label: str, rulebase: str) ->
         disabled = disabled_el is not None and (disabled_el.text or "").strip().lower() == "yes"
         action_el = entry.find("action")
         action = (action_el.text or "").strip() if action_el is not None and action_el.text else ""
+        tgt_devices, tgt_negate = _parse_target(entry)
 
         rules.append(RuleSnapshot(
             index=idx,
@@ -659,8 +660,29 @@ def parse_security_rules_in(container: ET.Element, label: str, rulebase: str) ->
             disabled=disabled,
             vi_tri=label,
             rulebase=rulebase,
+            target_devices=tgt_devices,
+            target_negate=tgt_negate,
         ))
     return rules
+
+
+def _parse_target(entry: ET.Element):
+    """Doc <target> cua 1 rule -> (danh sach serial, co phai dang NEGATE khong).
+
+        <target><devices><entry name="0123456789"/></devices><negate>no</negate></target>
+
+    Khong co <target> -> ([], False) = ap cho MOI firewall cua Device Group,
+    truong hop pho bien nhat nen phai la mac dinh.
+    """
+    target_el = entry.find("target")
+    if target_el is None:
+        return [], False
+    devices_el = target_el.find("devices")
+    serials = ([d.get("name") for d in devices_el.findall("entry") if d.get("name")]
+               if devices_el is not None else [])
+    negate_el = target_el.find("negate")
+    negate = negate_el is not None and (negate_el.text or "").strip().lower() == "yes"
+    return serials, negate
 
 
 def assemble_security_rules(config_root: ET.Element, dg_name: str) -> List[RuleSnapshot]:

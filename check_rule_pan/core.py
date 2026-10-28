@@ -259,6 +259,39 @@ class SecurityRule:
     vi_tri: str = ''
     rulebase: str = ''
     dg: str = ''
+    # --- TARGET / INSTALL-ON (10/2026) ---
+    # Mot rule trong Device Group co the chi duoc push xuong VAI firewall cu the
+    # (<target><devices>...), hoac "moi firewall TRU may con nay" (<negate>yes).
+    # He thong that co rule target rieng tung site, nen bo qua truong nay la:
+    #   * o CHECK RULE: bao "da duoc phep" bang mot rule KHONG he nam tren con
+    #     firewall dang hoi;
+    #   * o CHECK AUDIT: lay rule cua site B di che rule cua site A roi khuyen
+    #     xoa - mat dich vu o site A.
+    # Rong = ap cho MOI firewall cua Device Group (truong hop pho bien nhat).
+    target_devices: List[str] = field(default_factory=list)
+    target_negate: bool = False
+
+    def applies_to_serial(self, serial: Optional[str]) -> bool:
+        """Rule nay CO nam tren firewall `serial` khong?
+
+        Khong biet serial (nguoi dung chua chon Target Firewall) -> tra True:
+        khong duoc tu loai rule khi chua co can cu, vi loai nham mot rule allow
+        se thanh "chua co rule" va day nguoi dung di tao rule trung.
+        """
+        if not serial or not self.target_devices:
+            return True
+        co_trong_danh_sach = serial.strip() in self.target_devices
+        return (not co_trong_danh_sach) if self.target_negate else co_trong_danh_sach
+
+    @property
+    def target_text(self) -> str:
+        if not self.target_devices:
+            return ""
+        dau = "TRU " if self.target_negate else ""
+        ten = ", ".join(self.target_devices[:4])
+        if len(self.target_devices) > 4:
+            ten += f" (+{len(self.target_devices) - 4})"
+        return dau + ten
 
 
 # =========================================================================
@@ -392,6 +425,24 @@ def parse_service_groups(container) -> Dict[str, ServiceGroup]:
     return out
 
 
+def _parse_target(entry) -> Tuple[List[str], bool]:
+    """Doc <target> cua 1 rule -> (danh sach serial, co phai dang NEGATE khong).
+
+        <target><devices><entry name="0123456789"/></devices><negate>no</negate></target>
+
+    Khong co <target> / khong co <devices> -> ([], False) = ap cho MOI firewall
+    cua Device Group. Day la truong hop pho bien nhat nen phai la mac dinh.
+    """
+    target_el = entry.find('target')
+    if target_el is None:
+        return [], False
+    devices_el = target_el.find('devices')
+    serials = ([d.get('name') for d in devices_el.findall('entry') if d.get('name')]
+               if devices_el is not None else [])
+    negate = _text(target_el.find('negate')).lower() == 'yes'
+    return serials, negate
+
+
 def _parse_security_rules_from_rules_el(rules_el, vi_tri: str, rulebase: str,
                                          dg: str) -> List[SecurityRule]:
     """Parse moi <entry> trong 1 <rules>. Logic doc TUNG TRUONG giu NGUYEN VAN ban
@@ -411,9 +462,11 @@ def _parse_security_rules_from_rules_el(rules_el, vi_tri: str, rulebase: str,
         to_zones = _members(e.find('to')) or ['any']
         action = _text(e.find('action'), 'allow')
         disabled = _text(e.find('disabled')).lower() == 'yes'
+        tgt_devices, tgt_negate = _parse_target(e)
         out.append(SecurityRule(-1, name, source, destination, service, application,
                                  action, disabled, from_zones, to_zones,
-                                 vi_tri=vi_tri, rulebase=rulebase, dg=dg))
+                                 vi_tri=vi_tri, rulebase=rulebase, dg=dg,
+                                 target_devices=tgt_devices, target_negate=tgt_negate))
     return out
 
 
@@ -947,6 +1000,31 @@ def parse_config_root(root, dg_name: Optional[str] = None,
     # 0.3 - rulebase lap rap dung thu tu danh gia
     rules = assemble_security_rules_panorama(root, dg_name, local_rules=local_rules)
 
+    # TARGET / INSTALL-ON (10/2026): mot rule trong Device Group co the chi duoc
+    # push xuong VAI firewall cu the. He thong that co rule target rieng tung
+    # site, nen mot rule cua site B KHONG duoc dung de tra loi cau hoi ve site A.
+    #
+    # Da chon Target Firewall -> loai han nhung rule khong nam tren con do: cau
+    # hoi luc nay la "tren DUNG firewall nay, traffic co di duoc khong", va
+    # rulebase that cua no khong he co may rule kia.
+    # Chua chon -> GIU HET (khong duoc tu loai khi chua co can cu, loai nham mot
+    # rule allow se thanh "chua co rule" va day nguoi dung di tao rule trung),
+    # nhung phai NOI RA la ket qua co the chi dung voi mot so site.
+    rules_co_target = [r for r in rules if r.target_devices]
+    if target_serial:
+        giu = [r for r in rules if r.applies_to_serial(target_serial)]
+        bi_loai = len(rules) - len(giu)
+        rules = giu
+        for i, r in enumerate(rules):
+            r.index = i
+    else:
+        bi_loai = 0
+    target_note = {
+        'rules_co_target': len(rules_co_target),
+        'bi_loai_vi_target': bi_loai,
+        'ten_rule_co_target': [r.name for r in rules_co_target[:10]],
+    }
+
     # 0.6 - zone lay tu Template cua Target Firewall (khong co target -> tu vo hieu)
     interface_subnets: List[Tuple[int, int, int, str]] = []
     zones: Dict[str, List[str]] = {}
@@ -980,6 +1058,7 @@ def parse_config_root(root, dg_name: Optional[str] = None,
         'static_routes': static_routes,
         'target_serial': target_serial,
         'template_used': template_names,
+        'target_note': target_note,
     }
 
 

@@ -156,6 +156,12 @@ class RuleSnapshot:
     # rulebase ('pre'/'post') de dung xpath DELETE (0.8).
     vi_tri: str = ""
     rulebase: str = ""
+    # TARGET / INSTALL-ON (10/2026): rule co the chi duoc push xuong VAI firewall
+    # cu the. He thong that co rule target rieng tung site, nen lay rule cua site
+    # B di che rule cua site A roi khuyen xoa la lam mat dich vu o site A.
+    # Rong = ap cho MOI firewall cua Device Group.
+    target_devices: List[str] = field(default_factory=list)
+    target_negate: bool = False
     # Ket qua GroupResolver/ServiceResolver (dien vao trong detectors):
     resolved_source: Optional[object] = None
     resolved_destination: Optional[object] = None
