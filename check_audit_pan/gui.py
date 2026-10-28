@@ -30,12 +30,13 @@ from .pan_api import (
     PanApiClient, get_devicegroup_list, parse_devicegroup_objects,
     assemble_security_rules, delete_rule_candidate, disable_rule_candidate,
     fetch_rule_hit_count, fetch_rule_hit_count_multi, fetch_current_rule_states,
-    devicegroup_device_serials, get_panorama_device_serials,
+    collect_target_scopes, devicegroup_device_serials,
+    get_panorama_device_serials,
 )
 from .resolver import GroupResolver, ServiceResolver
 from .detectors import (
     find_shadow_rules, find_disabled_rules, find_overly_permissive_rules,
-    find_dead_target_rules, infrastructure_rules, trim_evidence_to_target,
+    find_dead_target_rules_all, infrastructure_rules, trim_evidence_to_target,
     find_overly_permissive_by_size, OVERLY_ADDR_THRESHOLD, OVERLY_PORT_THRESHOLD,
 )
 from .excel_io import export_findings, parse_import_file
@@ -525,18 +526,26 @@ class App(ttk.Frame):
                 # NameError; (2) `_serials` con hop them Target Firewall nguoi
                 # dung go tay, ma con do co the KHONG thuoc DG - hop vao thi
                 # dung mot rule target sai lai hoa ra hop le.
+                # Quet HET: Shared + MOI Device Group, khong chi DG dang chon.
+                # Rule chet nam o DG khac thi van la rule chet - va neu phai
+                # doi DG roi chay lai tung cai thi khong ai lam that.
                 try:
-                    _dg_serials = list(
-                        devicegroup_device_serials(self.config_root, dg_name) or [])
+                    _scopes = collect_target_scopes(self.config_root)
                 except Exception as e:                       # noqa: BLE001
-                    _dg_serials = []
-                    self._log(f"CANH BAO: khong liet ke duoc firewall cua Device "
-                              f"Group {dg_name} ({e}) - bo qua muc Rule CHET.")
-                _chet = find_dead_target_rules(rules, _dg_serials, dg_name)
+                    _scopes = []
+                    self._log(f"CANH BAO: khong duyet duoc cac Device Group "
+                              f"({e}) - bo qua muc Rule CHET.")
+                _chet = find_dead_target_rules_all(_scopes)
                 findings += _chet
-                self._log(f"Rule CHẾT (target sai serial): {len(_chet)} finding"
+                _bo_qua = [ten for ten, _r, _sr in _scopes if not _sr]
+                self._log(f"Rule CHẾT (target sai serial) - quét {len(_scopes)} "
+                          f"phạm vi (Shared + mọi Device Group): {len(_chet)} finding"
                           + (f" - {', '.join(f.rule_name for f in _chet[:10])}"
                              if _chet else ""))
+                if _bo_qua:
+                    self._log(f"LƯU Ý: {len(_bo_qua)} phạm vi KHÔNG đọc được "
+                              f"firewall nào nên bị bỏ qua (không có căn cứ thì "
+                              f"không kết luận): {', '.join(_bo_qua[:10])}")
 
             if "shadow" in types:
                 self._log(f"Đang audit Shadow Rules với ngưỡng Unused = {unused_threshold_days} ngày...")
@@ -547,7 +556,14 @@ class App(ttk.Frame):
                 self._log(f"Shadow Rules: {len(shadow_findings)} finding")
 
             # Gan 'vi_tri' cho tung Finding tu RuleSnapshot (theo index da lap rap 0.3).
+            # BO QUA finding da co vi_tri san: nhanh Rule CHET quet TOAN BO
+            # Panorama nen finding cua no den tu nhieu Device Group, con
+            # `rule_index` la chi so trong rulebase cua RIENG noi do - suy lai
+            # tu `rules` (rulebase da lap rap cua DG dang chon) se gan nham vi
+            # tri cua mot rule hoan toan khac.
             for f in findings:
+                if getattr(f, "vi_tri", ""):
+                    continue
                 if 0 <= f.rule_index < len(rules):
                     f.vi_tri = rules[f.rule_index].vi_tri
 

@@ -685,6 +685,63 @@ def _parse_target(entry: ET.Element):
     return serials, negate
 
 
+def collect_target_scopes(config_root: ET.Element):
+    """Gom DU LIEU cho phep quet "rule CHET" tren TOAN BO Panorama.
+
+    Tra ve list (nhan_pham_vi, rules_cua_rieng_noi_do, tap_serial_HOP_LE).
+
+    SERIAL NAO LA HOP LE THI TUY NOI RULE NAM:
+      * rule cua mot Device Group  -> thiet bi cua chinh DG do VA cua moi DG
+        CON cua no (rule o DG cha duoc day xuong toan bo nhanh con, nen target
+        toi mot firewall cua DG con la hoan toan hop le);
+      * rule o Shared              -> HOP thiet bi cua MOI Device Group. Mot
+        firewall khong nam trong Device Group nao thi khong nhan duoc policy
+        push, nen target toi no van la target chet.
+
+    Chi doc rulebase CUA RIENG tung noi (khong lap rap theo chuoi thua ke) -
+    neu lap rap thi mot rule Shared se xuat hien lai o moi Device Group va bi
+    bao chet nhieu lan.
+    """
+    parents = _dg_parents_from_config(config_root)
+    entries = _devicegroup_entries(config_root)
+
+    con_cua: Dict[str, List[str]] = {}
+    for ten, cha in parents.items():
+        if cha:
+            con_cua.setdefault(cha, []).append(ten)
+
+    def _ca_nhanh(dg: str) -> List[str]:
+        """DG do + moi DG con chau cua no."""
+        ra, hang_doi, da_qua = [], [dg], set()
+        while hang_doi:
+            cur = hang_doi.pop()
+            if cur in da_qua:
+                continue
+            da_qua.add(cur)
+            ra.append(cur)
+            hang_doi.extend(con_cua.get(cur, []))
+        return ra
+
+    serial_cua: Dict[str, List[str]] = {
+        ten: list(devicegroup_device_serials(config_root, ten) or [])
+        for ten in entries
+    }
+    moi_serial = {sr for ds in serial_cua.values() for sr in ds}
+
+    scopes = []
+    shared_el = get_shared_element(config_root)
+    if shared_el is not None:
+        rules = (parse_security_rules_in(shared_el, "Shared-PRE", "pre")
+                 + parse_security_rules_in(shared_el, "Shared-POST", "post"))
+        scopes.append(("Shared", rules, moi_serial))
+    for ten, el in sorted(entries.items()):
+        rules = (parse_security_rules_in(el, f"{ten}-PRE", "pre")
+                 + parse_security_rules_in(el, f"{ten}-POST", "post"))
+        hop_le = {sr for nhanh in _ca_nhanh(ten) for sr in serial_cua.get(nhanh, [])}
+        scopes.append((ten, rules, hop_le))
+    return scopes
+
+
 def assemble_security_rules(config_root: ET.Element, dg_name: str) -> List[RuleSnapshot]:
     """Lap rap rulebase security theo DUNG 6 buoc 0.3:
       1. Shared PRE-rulebase

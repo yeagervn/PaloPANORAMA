@@ -29,55 +29,68 @@ NOW_TYPE = datetime
 # ============================================================================
 # RULE CHET - <target> tro toi serial KHONG thuoc Device Group nay
 # ============================================================================
-def find_dead_target_rules(rules: List[RuleSnapshot], dg_serials, dg_name: str
-                           ) -> List[Finding]:
-    """Rule co <target> nhung KHONG serial nao thuoc Device Group dang chon.
+def _dead_finding(r: RuleSnapshot, ngoai: List[str], serials, pham_vi: str) -> Finding:
+    f = Finding(
+        check_type=CHECK_TYPE_TARGET_SAI,
+        rule_name=r.name,
+        rule_uuid=r.uuid,
+        rule_index=r.index,
+        source=r.source,
+        destination=r.destination,
+        service=r.service,
+        action=r.action,
+        disabled=r.disabled,
+        detail=(f"Target tro toi serial {', '.join(ngoai)} - KHONG serial nao "
+                f"thuoc {pham_vi} ({', '.join(sorted(serials))}). Rule nay "
+                f"KHONG duoc push xuong firewall nao ca."),
+    )
+    # Gan vi_tri NGAY TAI DAY. Quet toan bo Panorama thi finding den tu nhieu
+    # Device Group khac nhau, ma `rule_index` lai la chi so trong rulebase cua
+    # RIENG noi do - de gui.py suy vi_tri tu rule_index (nhu cac nhanh khac)
+    # se gan nham vi tri cua mot rule hoan toan khac.
+    f.vi_tri = r.vi_tri
+    return f
 
-    Rule do **khong duoc push xuong firewall nao ca** - no trong nhu dang chay
-    trong khi thuc te la rule CHET. Hay gap sau khi thay the thiet bi (RMA) ma
-    quen sua target, hoac sau khi chuyen firewall sang Device Group khac.
 
-    BA CHOT TRANH CANH BAO GIA (mot canh bao bi coi la nhieu thi lan sau no
-    THAT cung bi bo qua):
-      1. CHI xet rule do CHINH DG dang chon so huu (`vi_tri` = '<DG>-PRE' hoac
-         '<DG>-POST'). Rule o Shared / DG cha co the target hoan toan hop le
-         toi firewall cua mot nhanh Device Group khac.
-      2. CHI bao khi TOAN BO serial cua rule deu la. Con it nhat mot serial
-         hop le thi rule van song - no chi hep hon chu khong chet.
-      3. Bo qua dang `negate` ("moi firewall TRU may con nay"): voi dang do,
-         serial la trong danh sach loai tru khong he lam rule chet.
-    Va: khong doc duoc danh sach firewall cua DG (`dg_serials` rong) thi
-    KHONG bao gi - khong co can cu thi khong ket luan.
+def _dead_target(r: RuleSnapshot, serials) -> Optional[List[str]]:
+    """Danh sach serial la cua rule, hoac None neu rule nay khong phai rule chet.
+
+    Dung chung cho ca hai duong (1 Device Group va quet toan bo), de hai duong
+    khong the troi khoi nhau ve dinh nghia.
     """
-    serials = {s for s in (dg_serials or []) if s}
-    if not serials or not dg_name:
-        return []
-    cua_dg = {f"{dg_name}-PRE", f"{dg_name}-POST"}
+    tgt = [d for d in (r.target_devices or []) if d]
+    if not tgt or r.target_negate:
+        return None
+    ngoai = [d for d in tgt if d not in serials]
+    return ngoai if len(ngoai) == len(tgt) else None
+
+
+def find_dead_target_rules_all(scopes) -> List[Finding]:
+    """Quet rule CHET tren TOAN BO Panorama (Shared + moi Device Group).
+
+    `scopes` = ket qua `pan_api.collect_target_scopes()`: list
+    (nhan_pham_vi, rules_cua_rieng_noi_do, tap_serial_hop_le).
+
+    Khac ban mot-Device-Group o cho KHONG phai bo qua rule Shared / DG cha
+    nua: quet toan bo thi biet duoc tap serial hop le THAT cua tung noi (rule
+    cua DG cha duoc phep target toi firewall cua DG con; rule Shared duoc phep
+    target toi firewall cua bat ky DG nao), nen khong con ly do phai im lang
+    voi chung.
+
+    Van giu chot: pham vi nao khong doc duoc firewall nao thi BO QUA pham vi
+    do - khong co can cu thi khong ket luan.
+    """
     out: List[Finding] = []
-    for r in rules:
-        if r.vi_tri not in cua_dg:
+    for pham_vi, rules, serials in (scopes or []):
+        serials = {x for x in (serials or []) if x}
+        if not serials:
             continue
-        tgt = [d for d in (r.target_devices or []) if d]
-        if not tgt or r.target_negate:
-            continue
-        ngoai = [d for d in tgt if d not in serials]
-        if len(ngoai) != len(tgt):
-            continue
-        out.append(Finding(
-            check_type=CHECK_TYPE_TARGET_SAI,
-            rule_name=r.name,
-            rule_uuid=r.uuid,
-            rule_index=r.index,
-            source=r.source,
-            destination=r.destination,
-            service=r.service,
-            action=r.action,
-            disabled=r.disabled,
-            detail=(f"Target tro toi serial {', '.join(ngoai)} - KHONG serial nao "
-                    f"thuoc Device Group '{dg_name}' "
-                    f"({', '.join(sorted(serials))}). Rule nay KHONG duoc push "
-                    f"xuong firewall nao ca."),
-        ))
+        nhan = ("moi Device Group" if pham_vi == "Shared"
+                else f"Device Group '{pham_vi}' va cac DG con")
+        for r in rules or []:
+            ngoai = _dead_target(r, serials)
+            if ngoai:
+                out.append(_dead_finding(r, ngoai, serials, nhan))
     return out
 
 

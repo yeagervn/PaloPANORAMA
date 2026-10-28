@@ -321,7 +321,12 @@ class TestOKetQuaNoiRoRuleChiApChoFirewallNao(unittest.TestCase):
 class TestAuditBaoRuleCHET(unittest.TestCase):
     """Nguoi van hanh yeu cau: canh bao rule CHET phai co CA o tab CHECK AUDIT,
     vi audit la cho ho doc de tham khao va audit them - khong chi la mot dong
-    log thoang qua o tab CHECK RULE."""
+    log thoang qua o tab CHECK RULE.
+
+    Chi con MOT duong duy nhat: `find_dead_target_rules_all(scopes)`. Ban
+    mot-Device-Group da bo han - de hai ham cung lam mot viec thi som muon
+    chung troi khoi nhau, va cai khong duoc GUI goi se la cai sai.
+    """
 
     def _rules(self):
         def r(name, vi_tri, target=(), negate=False):
@@ -332,36 +337,155 @@ class TestAuditBaoRuleCHET(unittest.TestCase):
             r("R-CHET", "DG-HN-PRE", [SITE_B]),              # serial la -> CHET
             r("R-SONG", "DG-HN-PRE", [SITE_A]),              # dung firewall cua DG
             r("R-MOT-NUA", "DG-HN-POST", [SITE_A, SITE_B]),  # con 1 serial hop le
-            r("R-SHARED", "Shared-PRE", [SITE_B]),           # rule Shared - hop le
             r("R-NEGATE", "DG-HN-PRE", [SITE_B], negate=True),
             r("R-KHONG-TARGET", "DG-HN-PRE"),
         ]
 
-    def _ten(self, dg_serials=(SITE_A,), dg="DG-HN"):
-        from check_audit_pan.detectors import find_dead_target_rules
-        return [f.rule_name for f in find_dead_target_rules(self._rules(),
-                                                            list(dg_serials), dg)]
+    def _find(self, serials=(SITE_A,)):
+        from check_audit_pan.detectors import find_dead_target_rules_all
+        return find_dead_target_rules_all([("DG-HN", self._rules(), set(serials))])
 
     def test_bao_DUNG_rule_chet(self):
-        self.assertEqual(self._ten(), ["R-CHET"])
+        self.assertEqual([f.rule_name for f in self._find()], ["R-CHET"])
 
     def test_finding_noi_ro_CAN_CU(self):
-        from check_audit_pan.detectors import find_dead_target_rules
-        from check_audit_pan.core import CHECK_TYPE_TARGET_SAI, CHECK_TYPE_LABELS
+        from check_audit_pan.core import CHECK_TYPE_LABELS, CHECK_TYPE_TARGET_SAI
 
-        f = find_dead_target_rules(self._rules(), [SITE_A], "DG-HN")[0]
+        f = self._find()[0]
         self.assertEqual(f.check_type, CHECK_TYPE_TARGET_SAI)
         self.assertIn(CHECK_TYPE_TARGET_SAI, CHECK_TYPE_LABELS)
         self.assertIn(SITE_B, f.detail)          # serial la
-        self.assertIn(SITE_A, f.detail)          # firewall THAT cua DG
+        self.assertIn(SITE_A, f.detail)          # firewall THAT cua pham vi
         self.assertIn("DG-HN", f.detail)
 
     def test_KHONG_doc_duoc_danh_sach_firewall_thi_KHONG_bao_gi(self):
         """Khong co can cu thi khong ket luan."""
-        self.assertEqual(self._ten(dg_serials=()), [])
+        self.assertEqual(self._find(serials=()), [])
 
-    def test_khong_biet_dang_o_DG_nao_thi_KHONG_bao_gi(self):
-        self.assertEqual(self._ten(dg=""), [])
+
+
+SITE_C = "0033CCCC"
+XML_TOAN_BO = """<config>
+ <shared>
+  <pre-rulebase><security><rules>
+   <entry name="S-CHET">
+    <from><member>any</member></from><to><member>any</member></to>
+    <source><member>any</member></source><destination><member>any</member></destination>
+    <service><member>any</member></service><application><member>any</member></application>
+    <target><devices><entry name="0099ZZZZ"/></devices></target>
+    <action>allow</action>
+   </entry>
+   <entry name="S-SONG">
+    <from><member>any</member></from><to><member>any</member></to>
+    <source><member>any</member></source><destination><member>any</member></destination>
+    <service><member>any</member></service><application><member>any</member></application>
+    <target><devices><entry name="{C}"/></devices></target>
+    <action>allow</action>
+   </entry>
+  </rules></security></pre-rulebase>
+ </shared>
+ <devices><entry name="localhost.localdomain"><device-group>
+  <entry name="DG-ALL">
+    <pre-rulebase><security><rules>
+     <entry name="P-SONG-TOI-DG-CON">
+      <from><member>any</member></from><to><member>any</member></to>
+      <source><member>any</member></source><destination><member>any</member></destination>
+      <service><member>any</member></service><application><member>any</member></application>
+      <target><devices><entry name="{A}"/></devices></target>
+      <action>allow</action>
+     </entry>
+     <entry name="P-CHET">
+      <from><member>any</member></from><to><member>any</member></to>
+      <source><member>any</member></source><destination><member>any</member></destination>
+      <service><member>any</member></service><application><member>any</member></application>
+      <target><devices><entry name="0099ZZZZ"/></devices></target>
+      <action>allow</action>
+     </entry>
+    </rules></security></pre-rulebase>
+  </entry>
+  <entry name="DG-HN">
+    <parent-dg>DG-ALL</parent-dg>
+    <devices><entry name="{A}"/></devices>
+    <post-rulebase><security><rules>
+     <entry name="H-CHET-TRO-SANG-SITE-KHAC">
+      <from><member>any</member></from><to><member>any</member></to>
+      <source><member>any</member></source><destination><member>any</member></destination>
+      <service><member>any</member></service><application><member>any</member></application>
+      <target><devices><entry name="{C}"/></devices></target>
+      <action>allow</action>
+     </entry>
+    </rules></security></post-rulebase>
+  </entry>
+  <entry name="DG-SG">
+    <devices><entry name="{C}"/></devices>
+  </entry>
+  <entry name="DG-RONG"/>
+ </device-group></entry></devices>
+</config>""".replace("{A}", SITE_A).replace("{C}", SITE_C)
+
+
+class TestQuetRuleChetTOAN_BO_PANORAMA(unittest.TestCase):
+    """Rule chet nam o Device Group KHAC thi van la rule chet.
+
+    Bat nguoi dung doi Device Group roi chay lai tung cai thi thuc te khong ai
+    lam - nen muc nay quet HET: Shared + moi Device Group.
+    """
+
+    def _ten(self):
+        from check_audit_pan.detectors import find_dead_target_rules_all
+        from check_audit_pan.pan_api import collect_target_scopes
+
+        scopes = collect_target_scopes(ET.fromstring(XML_TOAN_BO))
+        return {f.rule_name: f for f in find_dead_target_rules_all(scopes)}
+
+    def test_quet_du_moi_pham_vi(self):
+        from check_audit_pan.pan_api import collect_target_scopes
+
+        scopes = collect_target_scopes(ET.fromstring(XML_TOAN_BO))
+        self.assertEqual([x[0] for x in scopes],
+                         ["Shared", "DG-ALL", "DG-HN", "DG-RONG", "DG-SG"])
+
+    def test_bat_rule_chet_o_MOI_noi(self):
+        self.assertEqual(sorted(self._ten()),
+                         ["H-CHET-TRO-SANG-SITE-KHAC", "P-CHET", "S-CHET"])
+
+    def test_rule_SHARED_target_toi_firewall_cua_BAT_KY_DG_nao_la_HOP_LE(self):
+        """Rule Shared duoc day xuong moi Device Group."""
+        self.assertNotIn("S-SONG", self._ten())
+
+    def test_rule_DG_CHA_target_toi_firewall_cua_DG_CON_la_HOP_LE(self):
+        """Rule o DG cha duoc day xuong toan bo nhanh con - bao chet la bao GIA."""
+        self.assertNotIn("P-SONG-TOI-DG-CON", self._ten())
+
+    def test_rule_cua_DG_nay_tro_sang_firewall_cua_DG_khac_la_CHET(self):
+        """DG-HN khong co firewall {C} ({C} thuoc DG-SG) - rule khong duoc push
+        xuong dau ca.""".replace("{C}", SITE_C)
+        self.assertIn("H-CHET-TRO-SANG-SITE-KHAC", self._ten())
+
+    def test_pham_vi_KHONG_co_firewall_nao_thi_bi_BO_QUA(self):
+        """DG-RONG khong co <devices> - khong co can cu thi khong ket luan."""
+        from check_audit_pan.pan_api import collect_target_scopes
+
+        scopes = dict((x[0], x[2]) for x in
+                      collect_target_scopes(ET.fromstring(XML_TOAN_BO)))
+        self.assertEqual(scopes["DG-RONG"], set())
+
+    def test_finding_mang_dung_VI_TRI_cua_chinh_no(self):
+        """Finding den tu nhieu DG khac nhau, ma rule_index lai la chi so trong
+        rulebase cua RIENG noi do - suy vi_tri tu rule_index se gan nham."""
+        self.assertEqual(self._ten()["H-CHET-TRO-SANG-SITE-KHAC"].vi_tri,
+                         "DG-HN-POST")
+        self.assertEqual(self._ten()["S-CHET"].vi_tri, "Shared-PRE")
+
+    def test_KHONG_bao_TRUNG_mot_rule_nhieu_lan(self):
+        """Doc rulebase cua RIENG tung noi, khong lap rap theo chuoi thua ke -
+        neu lap rap thi rule Shared se xuat hien lai o moi DG."""
+        from check_audit_pan.detectors import find_dead_target_rules_all
+        from check_audit_pan.pan_api import collect_target_scopes
+
+        ds = [f.rule_name for f in find_dead_target_rules_all(
+            collect_target_scopes(ET.fromstring(XML_TOAN_BO)))]
+        self.assertEqual(len(ds), len(set(ds)), f"bao trung: {ds}")
 
 
 class TestPredefinedService(unittest.TestCase):
