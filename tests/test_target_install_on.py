@@ -318,6 +318,52 @@ class TestOKetQuaNoiRoRuleChiApChoFirewallNao(unittest.TestCase):
         self.assertNotIn("CHI AP CHO FIREWALL", self._cell_text([]))
 
 
+class TestAuditBaoRuleCHET(unittest.TestCase):
+    """Nguoi van hanh yeu cau: canh bao rule CHET phai co CA o tab CHECK AUDIT,
+    vi audit la cho ho doc de tham khao va audit them - khong chi la mot dong
+    log thoang qua o tab CHECK RULE."""
+
+    def _rules(self):
+        def r(name, vi_tri, target=(), negate=False):
+            x = snap(len(name), name, target, negate)
+            x.vi_tri = vi_tri
+            return x
+        return [
+            r("R-CHET", "DG-HN-PRE", [SITE_B]),              # serial la -> CHET
+            r("R-SONG", "DG-HN-PRE", [SITE_A]),              # dung firewall cua DG
+            r("R-MOT-NUA", "DG-HN-POST", [SITE_A, SITE_B]),  # con 1 serial hop le
+            r("R-SHARED", "Shared-PRE", [SITE_B]),           # rule Shared - hop le
+            r("R-NEGATE", "DG-HN-PRE", [SITE_B], negate=True),
+            r("R-KHONG-TARGET", "DG-HN-PRE"),
+        ]
+
+    def _ten(self, dg_serials=(SITE_A,), dg="DG-HN"):
+        from check_audit_pan.detectors import find_dead_target_rules
+        return [f.rule_name for f in find_dead_target_rules(self._rules(),
+                                                            list(dg_serials), dg)]
+
+    def test_bao_DUNG_rule_chet(self):
+        self.assertEqual(self._ten(), ["R-CHET"])
+
+    def test_finding_noi_ro_CAN_CU(self):
+        from check_audit_pan.detectors import find_dead_target_rules
+        from check_audit_pan.core import CHECK_TYPE_TARGET_SAI, CHECK_TYPE_LABELS
+
+        f = find_dead_target_rules(self._rules(), [SITE_A], "DG-HN")[0]
+        self.assertEqual(f.check_type, CHECK_TYPE_TARGET_SAI)
+        self.assertIn(CHECK_TYPE_TARGET_SAI, CHECK_TYPE_LABELS)
+        self.assertIn(SITE_B, f.detail)          # serial la
+        self.assertIn(SITE_A, f.detail)          # firewall THAT cua DG
+        self.assertIn("DG-HN", f.detail)
+
+    def test_KHONG_doc_duoc_danh_sach_firewall_thi_KHONG_bao_gi(self):
+        """Khong co can cu thi khong ket luan."""
+        self.assertEqual(self._ten(dg_serials=()), [])
+
+    def test_khong_biet_dang_o_DG_nao_thi_KHONG_bao_gi(self):
+        self.assertEqual(self._ten(dg=""), [])
+
+
 class TestPredefinedService(unittest.TestCase):
     """`service-http` la HAI port roi rac 80 VA 8080 - KHONG phai dai 80-8080.
 

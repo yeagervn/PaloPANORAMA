@@ -28,6 +28,34 @@ from .resolver_engine import GroupResolver, _display_value, _resolve_service_lea
 from .matching_engine import find_first_allow_rule_match
 
 # ============================================================================
+# FONT CUA FILE XUAT
+# ============================================================================
+# Theo yeu cau: MOI file xuat cua ca bo tool dung CUNG mot font. Hai tab kia
+# (check_rule, check_audit) da dung Times New Roman tu dau; rieng tab nay con
+# hai duong bi lech:
+#   * sheet Security Rules ke thua font tu FILE TEMPLATE (template dung font gi
+#     thi ra font do);
+#   * sheet NAT / Object Where Used hardcode "Calibri", va nhung `Font(...)`
+#     khong dat `name` thi openpyxl tu dien Calibri.
+# Nen ngoai viec dat ten font o tung cho, con mot buoc EP LAI o cuoi: duyet moi
+# o da ghi va ghi de ten font. Lam vay vi dong tieu de cua sheet Security Rules
+# lay nguyen style tu template, khong di qua bien `base_font` nao ca.
+OUT_FONT_NAME = "Times New Roman"
+
+
+def _ep_font(ws) -> None:
+    """Ghi de TEN font cho moi o da ghi, giu nguyen size/dam/nghieng/mau."""
+    for row in ws.iter_rows():
+        for cell in row:
+            f = cell.font
+            if f is None or f.name == OUT_FONT_NAME:
+                continue
+            cell.font = Font(name=OUT_FONT_NAME, size=f.size, bold=f.bold,
+                             italic=f.italic, color=f.color, underline=f.underline,
+                             strike=f.strike, vertAlign=f.vertAlign)
+
+
+# ============================================================================
 # HIEN THI RICH-TEXT: dam (ten) / do (value thong tin) / XANH LA DAM (value
 # TRUNG voi input IP dang tim) - cho Source IP / Dest IP / Service
 # ============================================================================
@@ -384,7 +412,10 @@ def export_to_excel(output_dir: str, rules: List[SecurityRule],
     # Dung copy_style() vi cell.font/.fill/... doc tu workbook da load la
     # StyleProxy (khong hashable/khong gan lai truc tiep duoc cho cell khac).
     data_style_ref = ws.cell(row=2, column=col_name_rule)
-    base_font = copy_style(data_style_ref.font)
+    _tmpl_font = copy_style(data_style_ref.font)
+    base_font = Font(name=OUT_FONT_NAME, size=_tmpl_font.size,
+                     bold=_tmpl_font.bold, italic=_tmpl_font.italic,
+                     color=_tmpl_font.color)
     base_fill = copy_style(data_style_ref.fill)
     base_border = copy_style(data_style_ref.border)
     base_align = copy_style(data_style_ref.alignment)
@@ -535,6 +566,8 @@ def export_to_excel(output_dir: str, rules: List[SecurityRule],
 
     filename = f"rule_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
     output_path = os.path.join(output_dir, filename)
+    for _ws in wb.worksheets:
+        _ep_font(_ws)
     wb.save(output_path)
     log_func(f"Export OK -> {filename} ({len(matched_rule_indexes)} rule)")
     return output_path
@@ -706,18 +739,18 @@ def export_nat_to_excel(output_dir: str, nat_rules: List[NatRule], resolver: Gro
         ws = wb.active
         ws.title = NAT_SHEET_TITLE
 
-    header_font = Font(bold=True, color="FFFFFFFF")
+    header_font = Font(name=OUT_FONT_NAME, bold=True, color="FFFFFFFF")
     header_fill_hex = "FF305496"
     from openpyxl.styles import PatternFill
     header_fill = PatternFill(fill_type="solid", fgColor=header_fill_hex)
     header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
     data_align = Alignment(horizontal="left", vertical="top")
     wrap_align = Alignment(horizontal="left", vertical="top", wrap_text=True)
-    disabled_font = Font(bold=True, color="FFFF0000")
+    disabled_font = Font(name=OUT_FONT_NAME, bold=True, color="FFFF0000")
 
-    name_inline_font = InlineFont(rFont="Calibri", sz=11, b=True)
-    value_inline_font = InlineFont(rFont="Calibri", sz=11, color="FFFF0000")
-    matched_value_inline_font = InlineFont(rFont="Calibri", sz=11, b=True, color="FF008000")
+    name_inline_font = InlineFont(rFont=OUT_FONT_NAME, sz=11, b=True)
+    value_inline_font = InlineFont(rFont=OUT_FONT_NAME, sz=11, color="FFFF0000")
+    matched_value_inline_font = InlineFont(rFont=OUT_FONT_NAME, sz=11, b=True, color="FF008000")
 
     for col, htext in enumerate(NAT_HEADERS, start=1):
         c = ws.cell(row=1, column=col, value=htext)
@@ -785,6 +818,8 @@ def export_nat_to_excel(output_dir: str, nat_rules: List[NatRule], resolver: Gro
     prefix = "nat_search" if search_mode else "nat"
     filename = f"{prefix}_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
     output_path = os.path.join(output_dir, filename)
+    for _ws in wb.worksheets:
+        _ep_font(_ws)
     wb.save(output_path)
     if search_mode:
         log_func(f"Export NAT (Search) OK -> {filename} ({len(rules_to_export)}/{len(nat_rules)} rule khop "
@@ -855,6 +890,8 @@ def export_combined_to_excel(output_dir: str,
     prefix = "_".join(parts) + ("_search" if filter_ips else "")
     filename = f"{prefix}_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
     output_path = os.path.join(output_dir, filename)
+    for _ws in wb.worksheets:
+        _ep_font(_ws)
     wb.save(output_path)
     log_func(f"Export OK -> {filename} ({len(sheet_names)} sheet: "
              + " + ".join(sheet_names) + ")")
@@ -1004,13 +1041,13 @@ def export_where_used_to_excel(output_dir: str, reports, log_func=None,
 
     from openpyxl.styles import PatternFill
 
-    header_font = Font(bold=True, color="FFFFFFFF")
+    header_font = Font(name=OUT_FONT_NAME, bold=True, color="FFFFFFFF")
     header_fill = PatternFill(fill_type="solid", fgColor="FF305496")
     header_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
     data_align = Alignment(horizontal="left", vertical="top")
     wrap_align = Alignment(horizontal="left", vertical="top", wrap_text=True)
-    note_font = Font(italic=True, color="FF9C5700")
-    disabled_font = Font(bold=True, color="FFFF0000")
+    note_font = Font(name=OUT_FONT_NAME, italic=True, color="FF9C5700")
+    disabled_font = Font(name=OUT_FONT_NAME, bold=True, color="FFFF0000")
 
     widths = [20, 20, 34, 22, 46, 16, 12, 12, 24, 40, 60]
     for col, htext in enumerate(WHERE_HEADERS, start=1):
@@ -1045,6 +1082,8 @@ def export_where_used_to_excel(output_dir: str, reports, log_func=None,
 
     filename = f"object_where_used_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
     output_path = os.path.join(output_dir, filename)
+    for _ws in wb.worksheets:
+        _ep_font(_ws)
     wb.save(output_path)
     log_func(f"Export Check Object OK -> {filename} ({total} dong, "
              f"{len(reports or [])} muc da tra)")

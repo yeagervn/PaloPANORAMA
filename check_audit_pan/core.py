@@ -45,10 +45,15 @@ DEVICEGROUP_CHAIN = ["shared"]
 CHECK_TYPE_SHADOW = "shadow"
 CHECK_TYPE_DISABLED = "disabled"
 CHECK_TYPE_OVERLY = "overly_permissive"
+# Rule CHET: <target> tro toi serial KHONG thuoc Device Group nay, nen rule
+# khong duoc push xuong firewall nao ca - no trong nhu dang chay. Hay gap sau
+# khi thay the thiet bi (RMA) ma quen sua target.
+CHECK_TYPE_TARGET_SAI = "target_sai"
 CHECK_TYPE_LABELS = {
     CHECK_TYPE_SHADOW: "Shadow Rules",
     CHECK_TYPE_DISABLED: "Disabled Rules",
     CHECK_TYPE_OVERLY: "Overly Permissive Rules",
+    CHECK_TYPE_TARGET_SAI: "Rule CHET (target sai serial)",
 }
 
 SHADOW_UNREACHABLE = "UNREACHABLE"

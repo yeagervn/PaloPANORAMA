@@ -35,7 +35,7 @@ from .pan_api import (
 from .resolver import GroupResolver, ServiceResolver
 from .detectors import (
     find_shadow_rules, find_disabled_rules, find_overly_permissive_rules,
-    infrastructure_rules, trim_evidence_to_target,
+    find_dead_target_rules, infrastructure_rules, trim_evidence_to_target,
     find_overly_permissive_by_size, OVERLY_ADDR_THRESHOLD, OVERLY_PORT_THRESHOLD,
 )
 from .excel_io import export_findings, parse_import_file
@@ -131,11 +131,15 @@ class App(ttk.Frame):
         self.var_shadow = tk.BooleanVar(value=True)
         self.var_disabled = tk.BooleanVar(value=True)
         self.var_overly = tk.BooleanVar(value=True)
+        self.var_target_sai = tk.BooleanVar(value=True)
         ttk.Checkbutton(frm_feat, text="Shadow Rules", variable=self.var_shadow,
                         command=self._update_button_states).pack(side="left", padx=8, pady=4)
         ttk.Checkbutton(frm_feat, text="Disabled Rules", variable=self.var_disabled,
                         command=self._update_button_states).pack(side="left", padx=8, pady=4)
         ttk.Checkbutton(frm_feat, text="Overly Permissive Rules (Any)", variable=self.var_overly,
+                        command=self._update_button_states).pack(side="left", padx=8, pady=4)
+        ttk.Checkbutton(frm_feat, text="Rule CHẾT (target sai serial)",
+                        variable=self.var_target_sai,
                         command=self._update_button_states).pack(side="left", padx=8, pady=4)
 
         # Nguong UNUSED cau hinh duoc (dong bo voi ban Firewall standalone) - nhanh
@@ -270,6 +274,8 @@ class App(ttk.Frame):
             types.append("disabled")
         if self.var_overly.get():
             types.append("overly_permissive")
+        if self.var_target_sai.get():
+            types.append("target_sai")
         return types
 
     def _update_button_states(self):
@@ -509,6 +515,29 @@ class App(ttk.Frame):
                           f"{len([f for f in findings if f.check_type == 'overly_permissive'])} finding "
                           f"(trong do {len(_by_size)} phat hien theo kich thuoc THAT sau resolve, "
                           f"xep theo pham vi phoi nhiem giam dan)")
+            if "target_sai" in types:
+                # Rule CHET: target tro toi serial khong thuoc DG nay -> rule
+                # khong duoc push xuong dau ca.
+                #
+                # Lay THANG danh sach thiet bi cua Device Group, KHONG dung lai
+                # `_serials` cua nhanh hit-count: (1) bien do chi ton tai khi
+                # nguoi dung tick Shadow Rules - tick rieng muc nay la
+                # NameError; (2) `_serials` con hop them Target Firewall nguoi
+                # dung go tay, ma con do co the KHONG thuoc DG - hop vao thi
+                # dung mot rule target sai lai hoa ra hop le.
+                try:
+                    _dg_serials = list(
+                        devicegroup_device_serials(self.config_root, dg_name) or [])
+                except Exception as e:                       # noqa: BLE001
+                    _dg_serials = []
+                    self._log(f"CANH BAO: khong liet ke duoc firewall cua Device "
+                              f"Group {dg_name} ({e}) - bo qua muc Rule CHET.")
+                _chet = find_dead_target_rules(rules, _dg_serials, dg_name)
+                findings += _chet
+                self._log(f"Rule CHẾT (target sai serial): {len(_chet)} finding"
+                          + (f" - {', '.join(f.rule_name for f in _chet[:10])}"
+                             if _chet else ""))
+
             if "shadow" in types:
                 self._log(f"Đang audit Shadow Rules với ngưỡng Unused = {unused_threshold_days} ngày...")
                 shadow_findings = find_shadow_rules(rules, resolver, svc_resolver, hit_stats,

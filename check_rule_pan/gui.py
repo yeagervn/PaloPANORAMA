@@ -437,9 +437,18 @@ class PANOSCheckerGUI(ttk.Frame):
             for dev in root_el.findall("./devices/entry"):
                 if dev.get('name') != target_serial:
                     continue
-                v = dev.find("vsys/entry")
-                if v is not None and v.get('name'):
-                    return v.get('name')
+                ds = [e.get('name') for e in dev.findall("vsys/entry") if e.get('name')]
+                if len(ds) > 1:
+                    # Thiet bi khai NHIEU vsys: ham nay lay cai DAU TIEN, ma
+                    # Live Match goi nham vsys thi ket qua la cua mot he quy
+                    # chieu khac han. Noi ra de nguoi van hanh doi chieu, thay
+                    # vi de tool chon im lang.
+                    self._log(f"LƯU Ý: firewall {target_serial} khai {len(ds)} vsys "
+                              f"({', '.join(ds)}) - Live Match sẽ gọi với '{ds[0]}'. "
+                              f"Nếu rulebase cần kiểm nằm ở vsys khác thì kết quả "
+                              f"Live Match KHÔNG phải của vsys đó.")
+                if ds:
+                    return ds[0]
             # Panorama khong luu vsys cua thiet bi -> thu doan tu template cua no
             for dev in root_el.iter('devices'):
                 for e in dev.findall('entry'):

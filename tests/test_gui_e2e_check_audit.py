@@ -216,9 +216,15 @@ class TestCheckAuditGuiEndToEnd(unittest.TestCase):
         root, app = self._new_app()
         with _NoDialogs(gui_mod) as dialogs:
             self._connect(root, app)
+            # Bo tick HET - ke ca muc moi them. Them mot loai check ma quen
+            # dong bo o day thi test nay xanh gia (van con 1 muc duoc tick nen
+            # tool khong he canh bao gi).
             app.var_shadow.set(False)
             app.var_disabled.set(False)
             app.var_overly.set(False)
+            app.var_target_sai.set(False)
+            self.assertEqual(app._selected_types(), [],
+                             "con muc check nao do van dang duoc tick")
 
             app._on_check()
             root.update()
