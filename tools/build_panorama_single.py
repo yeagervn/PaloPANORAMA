@@ -63,9 +63,28 @@ def _make_zip_b64_lines():
 
 
 def _collect_external_imports():
-    """Top-level import BEN NGOAI (khong relative, khong thuoc 3 package) trong toan
-    bo source 3 package - de PyInstaller nhin thay va dong goi du khi build .exe."""
+    """Import BEN NGOAI (khong relative, khong thuoc cac package nhung) - de
+    PyInstaller nhin thay va dong goi du khi build .exe.
+
+    Tra ve (goc, submodule_chac_chan, ung_vien).
+
+    VI SAO PHAI CO 2 NHOM SAU - LOI THAT DA GAP (10/2026, ban .exe Check Point):
+    ban cu chi lay GOC (`import tkinter`), nen `from tkinter import font` trong
+    code khong he hien ra o khoi import lo thien. PyInstaller khong doc xuyen
+    qua chuoi base64, nen no khong nhung `tkinter.font`, va .exe nem
+    "cannot import name 'font' from 'tkinter'" - CHET CA MOT TAB. Chay tu
+    source thi khong bao gio lo, vi Python he thong luon co san submodule do.
+
+    `from X import Y` thi Y CO THE la submodule (tkinter.ttk) hoac chi la mot
+    ham (datetime.datetime). KHONG hoi importlib de phan biet: lam vay thi ket
+    qua phu thuoc may dang dung co cai goi do hay khong, va ban gop sinh ra
+    tren hai may se KHAC NHAU -> `--check` bao lech gia. Thay vao do doan HET
+    roi boc try/except: doan sai thi im lang bo qua, doan dung thi PyInstaller
+    nhin thay.
+    """
     roots = set()
+    submodules = set()
+    ung_vien = set()
     for pkg in PKG_NAMES:
         for p in sorted((ROOT / pkg).glob("*.py")):
             tree = ast.parse(p.read_text(encoding="utf-8"))
@@ -73,12 +92,23 @@ def _collect_external_imports():
                 if isinstance(node, ast.Import):
                     for a in node.names:
                         roots.add(a.name.split(".")[0])
+                        if "." in a.name:
+                            submodules.add(a.name)
                 elif isinstance(node, ast.ImportFrom):
                     if node.level == 0 and node.module:
                         roots.add(node.module.split(".")[0])
+                        if "." in node.module:
+                            submodules.add(node.module)
+                        else:
+                            for a in node.names:
+                                ung_vien.add(f"{node.module}.{a.name}")
     for own in PKG_NAMES:
         roots.discard(own)
-    return sorted(roots)
+        for tap in (submodules, ung_vien):
+            for ten in list(tap):
+                if ten.split(".")[0] == own:
+                    tap.discard(ten)
+    return sorted(roots), sorted(submodules), sorted(ung_vien)
 
 
 _OPEN_IMPORTS_HEADER = """# ============================================================================
@@ -93,7 +123,13 @@ _OPEN_IMPORTS_HEADER = """# ====================================================
 
 
 def _open_imports_block():
-    body = "\n".join(f"import {mod}" for mod in _collect_external_imports())
+    roots, submodules, ung_vien = _collect_external_imports()
+    body = "\n".join(f"import {mod}" for mod in roots + submodules)
+    # `ung_vien` la DOAN (co the la ham chu khong phai module) nen phai boc
+    # try/except; tkinter cung boc vi Python tren server co the khong kem Tk.
+    for mod in sorted(set(ung_vien) | {m for m in roots + submodules
+                                       if m.startswith("tkinter")}):
+        body += f"\n\ntry:\n    import {mod}\nexcept ImportError:\n    pass"
     return _OPEN_IMPORTS_HEADER + body
 
 
@@ -194,7 +230,9 @@ def build():
     py_compile.compile(str(TARGET), doraise=True)
     print(f"OK: da sinh lai {TARGET.name} ({len(text)} ky tu, zip {n_files} file "
           f"py / {zip_bytes} bytes) tu 3 package: {', '.join(PKG_NAMES)}")
-    print(f"    import lo thien: {', '.join(_collect_external_imports())}")
+    _g, _sm, _uv = _collect_external_imports()
+    print(f"    import lo thien: {', '.join(_g + _sm)}"
+          f" | doan (try/except): {len(_uv)} ten")
 
 
 def check() -> int:

@@ -10,7 +10,7 @@ import xml.etree.ElementTree as ET
 from typing import Any, Dict, Optional, Set
 
 import tkinter as tk
-from tkinter import ttk, filedialog, font as tkfont, messagebox, scrolledtext
+from tkinter import ttk, filedialog, messagebox, scrolledtext
 
 from .core import APP_TITLE, OUTPUT_DIR, LOG_PATH, DEFAULT_WORKERS, setup_logger, PanApiError
 from .core import parse_ip_list_input, build_run_plan, describe_run_plan
@@ -22,6 +22,30 @@ from .excel_export import (export_to_excel, export_nat_to_excel, export_nat_to_c
                             export_where_used_to_csv)
 from .where_used import format_report
 from . import rows as rowbuild
+
+def _font_deu(widget):
+    """Trả về (font ĐỀU của hệ thống, bản ĐẬM của nó) — KHÔNG dùng `tkinter.font`.
+
+    LỖI THẬT ĐÃ GẶP (10/2026, bản .exe): `from tkinter import font` ném
+    `ImportError: cannot import name 'font' from 'tkinter'` ngay lúc NẠP
+    module, nên **chết cả tab CHECK IP** - trong khi hai tab kia vẫn chạy.
+    PyInstaller chỉ nhúng những submodule của `tkinter` được liệt kê trong
+    `hiddenimports`, và `tkinter.font` không có trong danh sách đó.
+
+    Cách sửa ở đây là **bỏ hẳn phụ thuộc**: hỏi thẳng Tcl qua `widget.tk.call`
+    - thứ luôn có sẵn ở bất kỳ widget Tk nào - đúng việc mà `tkinter.font` làm
+    bên dưới. Thêm `tkinter.font` vào `hiddenimports` (đã làm) chỉ cứu được
+    bản .exe dựng lại; bỏ phụ thuộc thì cứu mọi đường chạy.
+
+    Lỗi đọc font -> lùi về Courier New: mất đúng độ rộng chữ, KHÔNG mất tab.
+    """
+    try:
+        family = str(widget.tk.call("font", "actual", "TkFixedFont", "-family"))
+        size = int(widget.tk.call("font", "actual", "TkFixedFont", "-size"))
+    except Exception:                                   # noqa: BLE001
+        family, size = "Courier New", 10
+    return (family, size), (family, size, "bold")
+
 
 class App(ttk.Frame):
     """Giao dien tool CHECK IP - dang 1 ttk.Frame de nhung duoc vao bat ky
@@ -205,9 +229,7 @@ class App(ttk.Frame):
         # Bang ket qua la mot widget Text, KHONG phai Treeview: Treeview chi to
         # mau duoc ca mot dong, ma thong tin lai nam o tung DOAN chu trong o -
         # xanh la = IP dang tra, do = phan con lai cua group. Xem rows.layout().
-        fixed = tkfont.nametofont("TkFixedFont")
-        fixed_bold = fixed.copy()
-        fixed_bold.configure(weight="bold")
+        fixed, fixed_bold = _font_deu(frm_res)
         self.txt_res = tk.Text(frm_res, height=14, wrap="none", font=fixed,
                                state="disabled", background="#FFFFFF")
         self.txt_res.grid(row=0, column=0, sticky="nsew", padx=(6, 0), pady=4)
