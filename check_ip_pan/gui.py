@@ -254,6 +254,19 @@ class App(ttk.Frame):
                                    font=fixed_bold)
         for _t in ("name", "value", "value_matched"):
             self.txt_res.tag_raise(_t)
+
+        # KEO CO GIAN COT. Treeview co san tro nay, widget Text thi khong - ma
+        # bang phai la Text de to duoc mau tung doan chu. Nen tu lam: bang la
+        # chu DEU nen "cot thu may" chi la mot phep dem ky tu, va
+        # `rows.column_edges()` da noi duong ke nam o ky tu so may.
+        self._col_chars = list(rowbuild.COL_WIDTHS)
+        self._keo = None                 # (chi so duong ke, ky tu luc bam)
+        self._rows_hien = []
+        self.txt_res.tag_configure("sep", foreground="#9aa4b2")
+        self.txt_res.bind("<Motion>", self._tren_duong_ke)
+        self.txt_res.bind("<Button-1>", self._bat_dau_keo)
+        self.txt_res.bind("<ButtonRelease-1>", self._tha_keo)
+        self.txt_res.bind("<Double-Button-1>", self._vua_khit_cot)
         self.lbl_counts = ttk.Label(frm_res, text="Chua chay.")
         self.lbl_counts.grid(row=2, column=0, columnspan=2, sticky="w", padx=6, pady=(0, 4))
 
@@ -699,19 +712,86 @@ class App(ttk.Frame):
         cot, tag ca dong, tag tung doan chu) nam ca trong rows.py - o day chi
         con `insert`."""
         self._display_rows = list(display)
-        self.txt_res.config(state="normal")
-        self.txt_res.delete("1.0", "end")
-        for line in rowbuild.layout(display):
-            row_tag = line["tag"]
-            for kind, text in line["segments"]:
-                tags = tuple(t for t in (row_tag, "" if kind == "text" else kind) if t)
-                self.txt_res.insert("end", text, tags)
-            self.txt_res.insert("end", "\n")
-        self.txt_res.config(state="disabled")
+        self._ve_bang(display)
         data = sum(1 for row in display if rowbuild.is_data_row(row))
         self.lbl_counts.config(
             text=f"{data} dong ket qua ({len(display)} dong ke ca tieu de muc).")
         self.lbl_progress.config(text=f"Xong: {data} dong ket qua.")
+
+    # ------------------------------------------------------- keo co gian cot
+    def _ky_tu_tai(self, x, y):
+        """Toa do chuot -> chi so KY TU tren dong do."""
+        try:
+            return int(str(self.txt_res.index(f"@{x},{y}")).split(".")[1])
+        except Exception:                               # noqa: BLE001
+            return -1
+
+    def _duong_ke_gan(self, cot):
+        """Duong ke nao dang o ngay duoi con tro (lech 1 ky tu van tinh)."""
+        for i, edge in enumerate(rowbuild.column_edges(self._col_chars)):
+            if abs(cot - edge) <= 1:
+                return i
+        return None
+
+    def _tren_duong_ke(self, ev):
+        """Doi con tro khi re qua duong ke - neu khong thi khong ai biet la
+        keo duoc."""
+        tren = self._duong_ke_gan(self._ky_tu_tai(ev.x, ev.y)) is not None
+        self.txt_res.configure(cursor="sb_h_double_arrow" if tren else "")
+
+    def _bat_dau_keo(self, ev):
+        cot = self._ky_tu_tai(ev.x, ev.y)
+        i = self._duong_ke_gan(cot)
+        self._keo = (i, cot) if i is not None else None
+
+    def _tha_keo(self, ev):
+        """Ve lai khi THA chuot, khong ve theo tung buoc re.
+
+        Mot bang vai tram dong x muoi cot la hang chuc nghin lan `insert`; ve
+        lai o moi su kien Motion thi keo giat den muc khong dung duoc.
+        """
+        if not self._keo:
+            return
+        i, cot_dau = self._keo
+        self._keo = None
+        delta = self._ky_tu_tai(ev.x, ev.y) - cot_dau
+        if not delta:
+            return
+        self._doi_be_ngang(i, self._col_chars[i] + delta)
+
+    def _vua_khit_cot(self, ev):
+        """Bam dup len duong ke: co cot ve vua du noi dung dai nhat cua no."""
+        i = self._duong_ke_gan(self._ky_tu_tai(ev.x, ev.y))
+        if i is None:
+            return "break"
+        dai = 0
+        for row in (self._rows_hien or []):
+            o = row.get("runs") or [[("text", c)] for c in row["cells"]]
+            if i < len(o):
+                dai = max(dai, len("".join(t for _k, t in o[i]).strip()))
+        self._doi_be_ngang(i, dai or rowbuild.COL_WIDTHS[i])
+        return "break"
+
+    def _doi_be_ngang(self, i, moi):
+        cu = self._col_chars[i]
+        self._col_chars[i] = max(6, min(200, int(moi)))
+        if self._col_chars[i] != cu:
+            self._ve_bang(self._rows_hien or [])
+
+    def _ve_bang(self, display):
+        """Do danh sach dong ket qua vao bang (dung lai khi keo cot)."""
+        self._rows_hien = list(display)
+        self.txt_res.config(state="normal")
+        self.txt_res.delete("1.0", "end")
+        for line in rowbuild.layout(display, widths=self._col_chars):
+            row_tag = line["tag"]
+            for kind, text in line["segments"]:
+                tags = tuple(t for t in (row_tag, "" if kind == "text" else kind) if t)
+                if text == rowbuild.COL_GAP:
+                    tags = tags + ("sep",)
+                self.txt_res.insert("end", text, tags)
+            self.txt_res.insert("end", "\n")
+        self.txt_res.config(state="disabled")
 
     def _on_export(self):
         """Ghi ra file tu dung bo du lieu tho cua luot chay vua roi."""

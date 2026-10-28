@@ -273,8 +273,32 @@ def log_rows(log_entries, rules, resolver, service_objects, service_groups
 #: Be ngang (so ky tu) cua 10 cot - ban Panorama co them cot 'Vi tri'. Font trong bang la font DEU, nen so ky tu
 #: la do do that su.
 COL_WIDTHS = (26, 16, 46, 46, 22, 13, 14, 14, 18, 12)
-#: Khoang cach giua 2 cot.
-COL_GAP = "  "
+#: Ngan cach giua 2 cot: mot duong ke doc THAT, khong phai hai dau cach.
+#:
+#: Hai dau cach thi mat phai tu doan ranh gioi cot - voi o co noi dung dai,
+#: xuong dong trong cot cua no, thi gan nhu khong doan duoc. Ky tu nay cung la
+#: cai de bat chuot khi keo co gian cot (xem `column_edges`).
+COL_GAP = " │ "
+
+
+def column_edges(widths: Sequence[int] = None, gap: str = None) -> List[int]:
+    """Vi tri (tinh theo SO KY TU) cua tung duong ke doc.
+
+    GUI dung no de biet nguoi dung dang bam vao duong ke nao: doi toa do chuot
+    ra chi so ky tu roi so voi danh sach nay. De o day vi no la HE QUA TRUC
+    TIEP cua cach dung bang - tinh lai ben `gui.py` la hai noi cung tu suy ra
+    mot thu roi som muon lech nhau.
+    """
+    widths = list(COL_WIDTHS if widths is None else widths)
+    gap = COL_GAP if gap is None else gap
+    giua = len(gap) // 2
+    edges: List[int] = []
+    pos = 0
+    for w in widths[:-1]:
+        pos += w
+        edges.append(pos + giua)
+        pos += len(gap)
+    return edges
 
 _WS = _re.compile(r"\s+")
 
