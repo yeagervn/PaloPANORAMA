@@ -397,6 +397,53 @@ def is_data_row(row: Dict[str, Any]) -> bool:
     return row.get("kind") not in ("section", "hdr", "note")
 
 
+#: Mui ten o dau dong tieu de muc. Bam vao dong do la thu gon / mo lai.
+MUI_TEN_MO = "▼"
+MUI_TEN_DONG = "▶"
+
+
+def khoa_muc(row: Dict[str, Any]) -> str:
+    """Khoa nhan dang mot muc - dung de NHO muc nao dang thu gon.
+
+    Nho theo CHI SO DONG thi chay lai mot luot khac la lech het, vi so dong
+    cua moi muc doi theo ket qua. Nho theo chu cua dong tieu de thi muc
+    "SECURITY RULE" van la muc do o moi luot chay.
+    """
+    return " ".join("".join(str(c) for c in row.get("cells") or []).split())
+
+
+def ap_dung_thu_gon(display: Sequence[Dict[str, Any]],
+                    dang_dong: Sequence[str] = ()) -> List[Dict[str, Any]]:
+    """Chen mui ten vao dau moi dong tieu de muc, va BO cac dong cua muc dang
+    thu gon.
+
+    Mot luot chay co the ra bon muc (Security Rule, NAT, Check Object, doi
+    chieu log); muc nao dang khong quan tam thi no van chiem cho va day muc
+    can xem xuong duoi. Thu gon duoc la nguoi doc tu quyet cho nao can nhin -
+    thay vi tool quyet thay.
+    """
+    dong = set(dang_dong or ())
+    out: List[Dict[str, Any]] = []
+    an = False
+    for row in display:
+        if row.get("kind") == "section":
+            khoa = khoa_muc(row)
+            an = khoa in dong
+            moi = dict(row)
+            cells = list(row.get("cells") or ())
+            mui = MUI_TEN_DONG if an else MUI_TEN_MO
+            dau = str(cells[0]) if cells else ""
+            cells[0] = f"{mui} {dau.lstrip()}" if dau.strip() else mui
+            moi["cells"] = tuple(cells)
+            moi["khoa_muc"] = khoa
+            moi.pop("runs", None)       # da doi chu o cell[0] -> runs cu khong con dung
+            out.append(moi)
+            continue
+        if not an:
+            out.append(row)
+    return out
+
+
 def layout(display: Sequence[Dict[str, Any]],
            widths: Sequence[int] = COL_WIDTHS,
            gap: str = COL_GAP) -> List[Dict[str, Any]]:
@@ -408,7 +455,7 @@ def layout(display: Sequence[Dict[str, Any]],
     """
     full = sum(widths) + len(gap) * (len(widths) - 1)
     out: List[Dict[str, Any]] = []
-    for row in display:
+    for _chi_so, row in enumerate(display):
         tag = row_tag(row)
         cells = row.get("runs") or [_cell_runs(c) for c in row["cells"]]
 
@@ -425,7 +472,8 @@ def layout(display: Sequence[Dict[str, Any]],
                 runs.extend(cell)
             for line in wrap_runs(_runs_one_line(runs), full):
                 used = sum(len(t) for _, t in line)
-                out.append({"tag": tag, "segments": list(line) +
+                out.append({"tag": tag, "row": _chi_so,
+                            "segments": list(line) +
                             ([("text", " " * (full - used))] if used < full else [])})
             continue
         wrapped = [wrap_runs(_runs_one_line(c), w)
@@ -440,7 +488,7 @@ def layout(display: Sequence[Dict[str, Any]],
                 used = sum(len(t) for _, t in line)
                 if used < width:
                     segs.append(("text", " " * (width - used)))
-            out.append({"tag": tag, "segments": segs})
+            out.append({"tag": tag, "row": _chi_so, "segments": segs})
     return out
 
 

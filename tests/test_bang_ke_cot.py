@@ -58,3 +58,43 @@ class TestDuongKeNganCot(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestThuGonTungMuc(unittest.TestCase):
+    """Moi luot chay co the ra bon muc; muc nao dang khong quan tam thi van
+    chiem cho va day muc can xem xuong duoi. Thu gon duoc la nguoi doc tu
+    quyet cho nao can nhin - thay vi tool quyet thay."""
+
+    def _display(self):
+        return (rowbuild.section("rule")
+                + [{"kind": "rule", "cells": tuple("x" for _ in rowbuild.COL_WIDTHS)}]
+                + rowbuild.section("nat")
+                + [{"kind": "nat", "cells": tuple("y" for _ in rowbuild.COL_WIDTHS)}])
+
+    def test_mo_thi_hien_mui_ten_XUONG_va_du_dong(self):
+        ra = rowbuild.ap_dung_thu_gon(self._display())
+        self.assertEqual(len(ra), 6)
+        self.assertTrue(rowbuild.layout_plain(ra).startswith(rowbuild.MUI_TEN_MO))
+
+    def test_thu_gon_thi_MAT_dong_cua_muc_do_nhung_GIU_dong_tieu_de(self):
+        d = self._display()
+        ra = rowbuild.ap_dung_thu_gon(d, [rowbuild.khoa_muc(d[0])])
+        chu = rowbuild.layout_plain(ra)
+        self.assertTrue(chu.startswith(rowbuild.MUI_TEN_DONG), chu[:40])
+        self.assertIn("SECURITY RULE", chu, "thu gon chu khong phai xoa dong tieu de")
+        self.assertIn("NAT", chu, "thu gon muc nay lai an luon muc khac")
+        self.assertEqual(len([r for r in ra if r["kind"] == "rule"]), 0)
+        self.assertEqual(len([r for r in ra if r["kind"] == "nat"]), 1)
+
+    def test_khoa_nho_theo_CHU_chu_khong_theo_chi_so_dong(self):
+        a = rowbuild.khoa_muc(rowbuild.section("rule")[0])
+        b = rowbuild.khoa_muc(rowbuild.section("rule")[0])
+        self.assertEqual(a, b)
+        self.assertNotEqual(a, rowbuild.khoa_muc(rowbuild.section("nat")[0]))
+
+    def test_moi_dong_man_hinh_biet_no_tu_dong_ket_qua_nao(self):
+        """GUI can no de biet nguoi dung vua bam vao tieu de muc nao."""
+        lines = rowbuild.layout(rowbuild.ap_dung_thu_gon(self._display()))
+        self.assertTrue(all("row" in ln for ln in lines))
+        self.assertEqual(lines[0]["row"], 0)
+        self.assertEqual(sorted({ln["row"] for ln in lines}), list(range(6)))

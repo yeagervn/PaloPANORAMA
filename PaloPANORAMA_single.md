@@ -934,6 +934,15 @@ hổng thật của sản phẩm** (hit-count bỏ sót phạm vi Shared) — kh
 
 # PHẦN XIV — NHẬT KÝ THAY ĐỔI GẦN NHẤT
 
+- **[2026-10-28g] Mục kết quả CHECK IP: THU GỌN / MỞ được bằng mũi tên** (`check_ip_pan/{rows,gui}.py`, `tests/test_bang_ke_cot.py`):
+  - Một lượt chạy có thể ra **bốn mục** (Security Rule, NAT, Check Object, đối chiếu log). Mục nào đang không quan tâm thì vẫn chiếm chỗ và **đẩy mục cần xem xuống dưới**. Dòng tiêu đề mục trước đây chỉ là một thanh xanh cứng, bấm vào không làm gì.
+  - Nay mở đầu bằng **`▼`** (đang mở) / **`▶`** (đang thu gọn); **bấm vào dòng đó** là thu gọn hoặc mở lại. Bắt **cả dòng** chứ không riêng ô mũi tên — mũi tên rộng đúng một ký tự, bắt mỗi nó thì người dùng phải nhắm, mà cả dòng đó vốn không dùng để làm gì khác.
+  - Thu gọn **giữ nguyên dòng tiêu đề**, chỉ bỏ các dòng dữ liệu (kể cả dòng tên cột). Thu gọn chứ không phải xoá.
+  - **Nhớ theo CHỮ của dòng tiêu đề, không theo chỉ số dòng** (`rows.khoa_muc`): số dòng mỗi mục đổi theo kết quả từng lượt chạy, nhớ theo chỉ số thì chạy lượt khác là lệch hết.
+  - Mỗi **dòng màn hình** nay mang theo chỉ số **dòng kết quả** sinh ra nó (`layout()` trả thêm khoá `row`) — đó là cách GUI biết vừa bấm vào tiêu đề mục nào. Một dòng kết quả trải ra nhiều dòng màn hình nên không suy ngược được bằng phép đếm.
+  - **Bằng chứng đo thật.** `python3.13` → **511 test, OK (skipped=5)**; `xvfb-run -a python3.12` → **524 test, OK, 0 skip**; `testlab --auto` → **106/106 PASS**; `--check` → exit **0**; SHA256 `26d56bc4c4207701b83b29f9077f65b76ee7dbaeba3470503f01d1bf7621c334`. **Kiểm chứng ngược** (đo ở bộ Check Point, cùng bộ mã): thu gọn mà vẫn giữ dòng của mục → **2 ca đỏ**; nhớ theo chỉ số → **1 ca đỏ**; bỏ khoá `row` → **1 ca đỏ**.
+  - **CHƯA làm / hạn chế còn lại.** (1) Trạng thái thu gọn **không được nhớ** giữa các lần mở tool. (2) Chưa có nút *"thu gọn hết / mở hết"*. (3) Mục thu gọn **vẫn được xuất đầy đủ ra file** — thu gọn là chuyện hiển thị, không phải lọc dữ liệu; file xuất mà thiếu theo trạng thái màn hình là một cái bẫy.
+
 - **[2026-10-28f] Bảng kết quả CHECK IP: đường kẻ ngăn cột + kéo co giãn được từng cột** (`check_ip_pan/{rows,gui}.py`, `tests/test_bang_ke_cot.py` mới):
   - Hai dấu cách giữa hai cột thì mắt phải **tự đoán** ranh giới — với ô có nội dung dài, xuống dòng **trong cột của nó**, thì gần như không đoán được. Ngăn cách nay là **đường kẻ dọc thật** (`│`), tô xám nhạt.
   - **Kéo chuột trên đường kẻ để co giãn cột**, **bấm đúp** để co cột về vừa đủ nội dung dài nhất. Con trỏ đổi hình khi rê qua đường kẻ — không thì không ai biết là kéo được.

@@ -262,6 +262,9 @@ class App(ttk.Frame):
         self._col_chars = list(rowbuild.COL_WIDTHS)
         self._keo = None                 # (chi so duong ke, ky tu luc bam)
         self._rows_hien = []
+        self._rows_bay_gio = []
+        self._dong_man_hinh = []
+        self._muc_dong = set()        # khoa cac muc dang thu gon
         self.txt_res.tag_configure("sep", foreground="#9aa4b2")
         self.txt_res.bind("<Motion>", self._tren_duong_ke)
         self.txt_res.bind("<Button-1>", self._bat_dau_keo)
@@ -743,6 +746,40 @@ class App(ttk.Frame):
         cot = self._ky_tu_tai(ev.x, ev.y)
         i = self._duong_ke_gan(cot)
         self._keo = (i, cot) if i is not None else None
+        if self._keo is None and self._bam_vao_tieu_de_muc(ev):
+            return "break"
+        return None
+
+    def _dong_ket_qua_tai(self, ev):
+        """Dong ket qua (khong phai dong man hinh) o ngay duoi con tro."""
+        try:
+            dong = int(str(self.txt_res.index(f"@{ev.x},{ev.y}")).split(".")[0])
+        except Exception:                               # noqa: BLE001
+            return None
+        if 1 <= dong <= len(self._dong_man_hinh):
+            return self._dong_man_hinh[dong - 1].get("row")
+        return None
+
+    def _bam_vao_tieu_de_muc(self, ev) -> bool:
+        """Bam vao dong tieu de muc -> thu gon / mo lai muc do.
+
+        Bat CA DONG chu khong rieng o mui ten: mui ten rong dung mot ky tu,
+        bat moi no thi nguoi dung phai nham - ma ca dong do von khong dung de
+        lam gi khac.
+        """
+        i = self._dong_ket_qua_tai(ev)
+        if i is None or not (0 <= i < len(self._rows_bay_gio)):
+            return False
+        row = self._rows_bay_gio[i]
+        if row.get("kind") != "section":
+            return False
+        khoa = row.get("khoa_muc") or rowbuild.khoa_muc(row)
+        if khoa in self._muc_dong:
+            self._muc_dong.discard(khoa)
+        else:
+            self._muc_dong.add(khoa)
+        self._ve_bang(self._rows_hien)
+        return True
 
     def _tha_keo(self, ev):
         """Ve lai khi THA chuot, khong ve theo tung buoc re.
@@ -779,11 +816,16 @@ class App(ttk.Frame):
             self._ve_bang(self._rows_hien or [])
 
     def _ve_bang(self, display):
-        """Do danh sach dong ket qua vao bang (dung lai khi keo cot)."""
+        """Do danh sach dong ket qua vao bang (dung lai khi keo cot / thu gon muc)."""
         self._rows_hien = list(display)
+        # `_rows_bay_gio` la ban DANG hien (da bo dong cua muc thu gon), con
+        # `_rows_hien` giu ban DAY DU de mo lai duoc.
+        self._rows_bay_gio = rowbuild.ap_dung_thu_gon(self._rows_hien, self._muc_dong)
+        self._dong_man_hinh = rowbuild.layout(self._rows_bay_gio,
+                                              widths=self._col_chars)
         self.txt_res.config(state="normal")
         self.txt_res.delete("1.0", "end")
-        for line in rowbuild.layout(display, widths=self._col_chars):
+        for line in self._dong_man_hinh:
             row_tag = line["tag"]
             for kind, text in line["segments"]:
                 tags = tuple(t for t in (row_tag, "" if kind == "text" else kind) if t)
